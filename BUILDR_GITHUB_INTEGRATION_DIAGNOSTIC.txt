@@ -1,0 +1,1 @@
+buildr github integration diagnostic
