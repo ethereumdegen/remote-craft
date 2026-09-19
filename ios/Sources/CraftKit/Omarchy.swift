@@ -54,11 +54,63 @@ enum Omarchy {
     /// List the fingerprints the box currently trusts, to compare with this phone's.
     static let listAuthorizedKeys = "ssh-keygen -lf ~/.ssh/authorized_keys"
 
-    /// A GitHub *signing* key is not published at `/<user>.keys`; only an *authentication*
-    /// key is. That single word is the difference between `--gh-keys` working and
-    /// silently authorizing nothing.
-    static let publishAuthenticationKey =
-        #"gh ssh-key add ~/.ssh/id_ed25519.pub --type authentication --title "iPhone""#
+    /// Printed by `authorizeCommand` when the key is present in `authorized_keys`
+    /// *after* the append. A sentinel rather than an exit status because an SSH exec
+    /// channel's status is the easiest thing in this stack to lose: Citadel surfaces a
+    /// non-zero exit as a thrown error, a zero exit as nothing at all, and "nothing at
+    /// all" is indistinguishable from a command that never ran.
+    static let authorized = "remote-craft-authorized"
+
+    /// Authorize one more key on a box this phone can **already** reach, over the
+    /// connection it already has.
+    ///
+    /// This is the second-device answer, and it is the one `--gh-keys` cannot give:
+    /// Omarchy's script `curl`s `github.com/<user>.keys` exactly once, at the moment it
+    /// runs, so a key published afterwards is invisible to a box that already ran it.
+    /// Once *any* key works, though, the app has a shell — and appending a line to
+    /// `authorized_keys` needs no script, no sudo, and no walk to the machine.
+    ///
+    /// Idempotent by `grep -qxF`: enrolling twice is a thing users do when the first
+    /// attempt's result was ambiguous, and a duplicated line is how `authorized_keys`
+    /// grows a key nobody can account for. `-x` anchors the whole line and `-F` turns
+    /// off patterns, so the base64 in a key cannot be read as a regex.
+    ///
+    /// The permissions are set every time rather than only at creation. sshd silently
+    /// ignores an `authorized_keys` that is group-writable — `StrictModes` is on by
+    /// default — and a box whose `~/.ssh` was made by hand with a loose umask fails
+    /// exactly this way, with the key visibly present in the file and refused anyway.
+    static func authorizeCommand(publicLine: String) -> String {
+        let line = shellLiteral(publicLine)
+        guard !line.isEmpty else { return "" }
+        return [
+            "install -d -m 700 ~/.ssh",
+            "touch ~/.ssh/authorized_keys",
+            "chmod 600 ~/.ssh/authorized_keys",
+            "grep -qxF '\(line)' ~/.ssh/authorized_keys || printf '%s\\n' '\(line)' >> ~/.ssh/authorized_keys",
+            "grep -qxF '\(line)' ~/.ssh/authorized_keys && echo \(authorized)",
+        ].joined(separator: "; ")
+    }
+
+    /// An `authorized_keys` line reduced to what is safe inside a single-quoted shell
+    /// word, which is everything except the single quote itself.
+    ///
+    /// Stripping rather than escaping, and for the same reason `githubUsername` filters:
+    /// the only characters a real key line contains are base64 and the comment, the
+    /// comment is the one part a user can type, and a key whose comment had to be
+    /// escaped to be safe is a key worth refusing to be clever about. Backslash goes
+    /// too — it is inert inside single quotes, but this string is also shown on screen
+    /// next to the `--key=` form, which is double-quoted and where it is not.
+    static func shellLiteral(_ publicLine: String) -> String {
+        let unsafe: Set<Character> = ["'", "\"", "\\", "`", "$", "\n", "\r"]
+        // Trimmed *after* filtering, not before. Removing a trailing quote exposes the
+        // space in front of it, and the result is written into `authorized_keys` and
+        // then matched against with `grep -qxF`, which anchors the whole line: a line
+        // stored with a trailing space is a line the app can only find again by
+        // reproducing that space exactly.
+        return publicLine
+            .filter { !unsafe.contains($0) }
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// `omarchy-setup-security-sshd --key="<line>"` — turns on sshd, opens the firewall
     /// and authorizes this one key, in one command.
@@ -79,7 +131,17 @@ enum Omarchy {
         return "\(setup) --key=\"\(line)\""
     }
 
-    /// `omarchy-setup-security-sshd --gh-keys <user>` — the "git keys" route.
+    /// `omarchy-setup-security-sshd --gh-keys <user>` — the box command.
+    ///
+    /// The whole reason the app signs in to GitHub: this line is short enough to read
+    /// off a phone and type at the box's keyboard, where `--key="ecdsa-sha2-nistp256
+    /// AAAA…"` is a hundred characters of base64 that needs a QR code and a camera to
+    /// cross the gap between the two machines.
+    ///
+    /// What it does not do is subscribe. Omarchy's script `curl`s
+    /// `github.com/<user>.keys` exactly once, when it runs, so a key published
+    /// afterwards is invisible to a box that already ran it — which is why
+    /// `RemoteEnroll` exists for every device after the first.
     static func githubCommand(username: String) -> String {
         let user = githubUsername(username)
         guard !user.isEmpty else { return "\(setup) --gh-keys" }
@@ -88,17 +150,14 @@ enum Omarchy {
 
     /// GitHub usernames are alphanumerics and hyphens, nothing else. Filtering rather
     /// than quoting because the result is pasted into a root-capable shell command: a
-    /// field that can carry a `;` is a field that can carry a second command.
+    /// field that can carry a `;` is a field that can carry a second command. The name
+    /// now comes from the signed-in account rather than a text field, which makes this
+    /// belt and braces — and worth keeping for exactly that reason, since the thing
+    /// that would remove the braces is a refactor nobody will re-audit.
     static func githubUsername(_ raw: String) -> String {
         String(raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .prefix(39)
             .filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") })
-    }
-
-    static func githubKeysURL(username: String) -> URL? {
-        let user = githubUsername(username)
-        guard !user.isEmpty else { return nil }
-        return URL(string: "https://github.com/\(user).keys")
     }
 
     // MARK: - liveness
@@ -111,58 +170,3 @@ enum Omarchy {
     static let keepaliveMisses: CInt = 3
 }
 
-/// What `https://github.com/<user>.keys` said.
-///
-/// Three outcomes that look identical if you only check for an error, and mean completely
-/// different things to someone about to walk to another machine and type `--gh-keys`:
-/// there is no such user, the user exists and has published nothing, or there are N keys
-/// and the route will work.
-enum GitHubKeys: Equatable {
-    case published(Int)
-    case noSuchUser(String)
-    case noKeys(String)
-    case failed(String)
-
-    /// GitHub answers `/<user>.keys` with 200 and a body of one key per line, or 404 for
-    /// a user that does not exist. A user with no *authentication* keys is a 200 with an
-    /// empty body — the case that makes `--gh-keys` authorize nothing at all while
-    /// appearing to succeed.
-    static func read(status: Int, body: String, username: String) -> GitHubKeys {
-        let user = Omarchy.githubUsername(username)
-        switch status {
-        case 404:
-            return .noSuchUser(user)
-        case 200:
-            let lines = body
-                .split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            return lines.isEmpty ? .noKeys(user) : .published(lines.count)
-        default:
-            return .failed("GitHub answered \(status)")
-        }
-    }
-
-    /// One line, the way the enrollment screen says it.
-    var summary: String {
-        switch self {
-        case .published(let count):
-            return count == 1
-                ? "1 key published — `--gh-keys` will authorize it."
-                : "\(count) keys published — `--gh-keys` will authorize all \(count)."
-        case .noSuchUser(let user):
-            return "GitHub has no user called \(user)."
-        case .noKeys(let user):
-            return "\(user) exists but has published no SSH keys. `--gh-keys` would authorize nothing."
-        case .failed(let why):
-            return why
-        }
-    }
-
-    /// Only `published` means the route works. The other three are why this button exists
-    /// at all: finding out here beats finding out at the box.
-    var isUsable: Bool {
-        if case .published = self { return true }
-        return false
-    }
-}

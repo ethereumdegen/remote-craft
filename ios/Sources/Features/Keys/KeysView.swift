@@ -93,12 +93,15 @@ struct KeysView: View {
     }
 }
 
-/// One key, and the line the box needs.
+/// One key, and the two ways to get a box to trust it.
 struct KeyCard: View {
     @Environment(KeyRing.self) private var keys
+    @Environment(TerminalStore.self) private var terminal
     let record: KeyRecord
 
     @State private var copied = false
+    @State private var authorizing = false
+    @State private var authorized: AuthorizeResult?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -156,6 +159,34 @@ struct KeyCard: View {
                         .font(Theme.mono(10))
                         .foregroundStyle(Theme.faint)
                         .textSelection(.enabled)
+                }
+            }
+
+            // The cheap route, offered only when it exists. A live terminal means a
+            // box that already trusts *some* key on this phone, and SSH multiplexes —
+            // so appending this one costs no connection and cannot trip Omarchy's
+            // `ufw limit 22/tcp` ban the way a second dial would.
+            if !record.publicLine.isEmpty, terminal.isLive {
+                Button(authorizing ? "authorizing" : "authorize on the connected box") {
+                    authorizing = true
+                    Task {
+                        authorized = await terminal.authorize(record.publicLine)
+                        authorizing = false
+                    }
+                }
+                .buttonStyle(CraftButton())
+                .disabled(authorizing)
+                switch authorized {
+                case .authorized(let address):
+                    Text("Authorized on \(address).")
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.live)
+                case .failed(let why):
+                    Text(why)
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.alarm)
+                case nil:
+                    EmptyView()
                 }
             }
         }

@@ -400,6 +400,24 @@ final class ShellSession {
         outbox?.yield(.size(cols: cols, rows: rows))
     }
 
+    /// Authorize one more public key on the box this session is already talking to.
+    ///
+    /// A passthrough rather than a `client` accessor on purpose. Handing the
+    /// `SSHClient` out would hand out `close()` with it, and one stray close ends the
+    /// user's PTY — the shell, its scrollback, and whatever was running in it — for the
+    /// sake of appending a line to a file. `stop()` stays the only way a session ends,
+    /// which is the same rule that makes the epoch checks in `TerminalStore` sound.
+    ///
+    /// Costs no connection: SSH multiplexes, so the exec channel `RemoteEnroll` opens
+    /// rides the socket that is already up and never reaches ufw's six-per-thirty-
+    /// seconds counter.
+    func authorize(line: String, address: String) async -> AuthorizeResult {
+        guard let client else {
+            return .failed("The terminal is not connected to that box any more, so there was nothing to authorize over.")
+        }
+        return await RemoteEnroll.authorize(line: line, over: client, address: address)
+    }
+
     func stop() {
         userClosed = true
         outbox?.finish()

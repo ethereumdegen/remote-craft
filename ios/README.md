@@ -36,6 +36,26 @@ Both come from SwiftTerm, and both fail the build before a line of this app is c
 2. SwiftTerm has a Metal renderer, so the build needs the Metal toolchain, which Xcode 26
    no longer installs by default: `xcodebuild -downloadComponent MetalToolchain` (≈690 MB).
 
+### The GitHub sign-in, if you want it
+
+`RC_GITHUB_CLIENT_ID` in `project.yml` is empty in a clean checkout, and the app says so
+on screen rather than failing at the first request. Enrollment works without it — the box
+command just carries the whole key and the QR code stays. Fill it in, or pass
+`xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx`, to get the short `--gh-keys` command.
+
+A client id is **not** a secret: the device flow exchanges it for a token with no client
+secret at all, which is the entire reason this app can talk to GitHub without a backend.
+Register at <https://github.com/settings/apps> and set two things that are off by default
+and fail silently in different ways:
+
+- **Device flow: enabled.** Otherwise sign-in returns `device_flow_disabled`, which the
+  app names as a setup error rather than reporting "GitHub answered 400".
+- **"Git SSH keys" user permission: write.** A GitHub App ignores OAuth scopes entirely,
+  so the `write:public_key` in the request does nothing for one; the fine-grained user
+  permission is what grants `POST /user/keys`. Get it wrong and publishing returns 403.
+  (A classic **OAuth App** is the other option, and there `write:public_key` is exactly
+  what you need.)
+
 ## Source tree
 
 ```
@@ -49,10 +69,12 @@ ios/
     CraftKit/                       the wire layer; no SwiftUI below this line
       Diagnosis.swift               failed-connection facts -> named, actionable diagnosis
       Host.swift                    SSHHost, candidate order, agent base URLs
+      GitHubAuth.swift              device-flow sign-in; publishes this phone's key
       Keys.swift                    KeyRecord, Secure Enclave + imported keys, SSH auth
-      Omarchy.swift                 the box's own commands; GitHub `.keys` outcomes
+      Omarchy.swift                 the box's own commands, and the ones run over SSH
       PublicKeyLine.swift           OpenSSH public-key wire format + SHA256 fingerprints
       Reconnect.swift               DialSchedule: backoff under Omarchy's ufw rate limit
+      RemoteEnroll.swift            authorize a key over a connection that already works
       SSHSession.swift              Citadel dial with fallback, TOFU host keys, PTY session
       Workshop.swift                metalcraft-agent HTTP client (chats, turn, watch, stop)
       WorkshopEvents.swift          SSE frame types and the `data:` line parser
@@ -93,26 +115,51 @@ Omarchy has exactly one remote-in feature, `omarchy-setup-security-sshd`
 `/etc/ssh/sshd_config.d/10-omarchy-hardening.conf`. The app has no password field for
 exactly that reason: after enrollment a password would not be accepted anyway.
 
-**This phone's key (the good route).** The enrollment screen generates a Secure Enclave
-P-256 key — the private half is created inside the chip and cannot be exported, backed
-up, or restored onto another device — and builds the one command that authorizes it,
-shown as copyable text and as a QR code:
+There is **one key**: a Secure Enclave P-256 key, generated on first use, whose private
+half is created inside the chip and cannot be exported, backed up, or restored onto
+another device. Everything below is a way of getting some box to trust that one key. The
+app no longer offers to import a private key as part of enrollment — it has no reason to
+hold private bytes, so it does not.
+
+**The first box costs one command.** Nothing can remove it. `--key=` carries the whole
+`authorized_keys` line, so the screen shows it as copyable text *and* as a QR code,
+because retyping a hundred characters of base64 across a gap between two machines is how
+this step actually fails:
 
 ```sh
 omarchy-setup-security-sshd --key="ecdsa-sha2-nistp256 AAAA… remote-craft@iphone"
 ```
 
-Open a terminal on the box with `Super + Return` and run it.
+**Signing in to GitHub shortens that command to something typeable.** The app publishes
+this phone's *Enclave* public key to your account with `POST /user/keys`, which puts it
+at `https://github.com/<you>.keys` — the URL Omarchy's script reads. The box command
+then becomes:
 
-**GitHub keys (the "git keys" route).** `omarchy-setup-security-sshd --gh-keys <user>`
-makes the box fetch `https://github.com/<user>.keys` and authorize everything there. The
-app builds that command too, and will fetch the URL first so you know before you walk to
-the box whether it will do anything: no such user, no published keys, or N keys are three
-different answers. Only keys of type **authentication** are published there —
-`gh ssh-key add ~/.ssh/id_ed25519.pub --type authentication --title "iPhone"` fixes a key
-that is not. Because that route authorizes a key whose private half lives on another
-machine, it ends by importing that private key into the app, which is strictly weaker
-than the Enclave key: the app then holds the real private bytes.
+```sh
+omarchy-setup-security-sshd --gh-keys andrew
+```
+
+No QR, no clipboard, no camera. Two things worth knowing before choosing it: `--gh-keys`
+authorizes **every** key published on that account, not only this phone's, which is a
+wider grant than `--key=`; and because the app creates the key through the API it is
+always an *authentication* key, which removes the old trap where a *signing* key is
+absent from `/<user>.keys` and `--gh-keys` silently authorizes nothing.
+
+Sign-in is the OAuth **device flow** — the app shows an eight-character code, you enter
+it at `github.com/login/device`. Not the web flow: GitHub still requires `client_secret`
+at the token endpoint even with PKCE, and a client secret needs a server this app has
+deliberately never had. The device flow exchanges a `client_id` alone, which is not a
+secret and ships in the bundle.
+
+**Every box after the first costs nothing.** `--gh-keys` is a snapshot: Omarchy `curl`s
+the URL once, when the script runs, so a key published afterwards is invisible to a box
+that already ran it. Instead, when the terminal is connected, the enrollment screen and
+every key card offer *authorize over the live session* — one tap, which appends the line
+to `~/.ssh/authorized_keys` over the SSH connection that is already up. SSH multiplexes,
+so it opens no new socket and cannot trip the `ufw limit 22/tcp` ban that a second dial
+risks. It is idempotent (`grep -qxF` before the append) and it re-applies `700`/`600` on
+`~/.ssh` every time, because sshd's `StrictModes` silently ignores a group-writable
+`authorized_keys` and that failure looks exactly like an unauthorized key.
 
 Then in Hosts, add the box. There are three ways to address it and they fail differently:
 

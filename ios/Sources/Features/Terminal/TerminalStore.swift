@@ -62,6 +62,13 @@ final class TerminalStore {
     private var feedToken = 0
     private var backlog: [UInt8] = []
     private var host: SSHHost?
+    /// The address the live session actually attached to, which is not always the one
+    /// in `host`: a MagicDNS name that did not resolve falls back to the pinned `100.x`
+    /// address, and reporting an enrollment against the name that failed would be a
+    /// lie. Only meaningful while `isLive`, which is what reads it — `state` leaves
+    /// `.up` on every path that ends a session, so a stale address is unreachable
+    /// rather than merely unlikely.
+    private var attachedAddress = ""
     private var keys: [KeyRecord] = []
     private var size = (cols: 80, rows: 24)
     /// The wake generation this session was started under. A bump means the socket under
@@ -156,6 +163,20 @@ final class TerminalStore {
         session.resize(cols: cols, rows: rows)
     }
 
+    /// Authorize one more public key on the box this terminal is connected to.
+    ///
+    /// Goes over the live session rather than dialling. A second dialer would keep its
+    /// own view of ufw's six-connections-per-thirty-seconds window and ban the phone
+    /// from the box it is enrolling, and sharing `DialSchedule` would be worse in a
+    /// quieter way: its failure counter is the terminal's reconnect backoff, and a
+    /// one-shot enrollment failure has no business lengthening it.
+    func authorize(_ line: String) async -> AuthorizeResult {
+        guard isLive, !attachedAddress.isEmpty else {
+            return .failed("The terminal is not connected to that box, so there is no session to authorize over. Connect first — this route needs a box the phone can already reach.")
+        }
+        return await session.authorize(line: line, address: attachedAddress)
+    }
+
     /// Start one attempt, no sooner than the schedule allows.
     ///
     /// The wait is announced rather than silent: an app that appears to do nothing for
@@ -219,6 +240,7 @@ final class TerminalStore {
         guard epoch == self.epoch else { return }
         switch event {
         case .opened(let attached):
+            attachedAddress = attached.address
             state = .up
             everOpened = true
             diagnosis = nil
