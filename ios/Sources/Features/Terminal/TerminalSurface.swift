@@ -49,11 +49,16 @@ struct TerminalSurface: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: SwiftTerm.TerminalView, coordinator: Coordinator) {
-        coordinator.store.releaseFeed()
+        coordinator.releaseFeed()
     }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
         var store: TerminalStore
+        /// The feed this coordinator installed. The store has one feed slot and SwiftUI
+        /// may make the replacement view before dismantling this one, so releasing by
+        /// token is what stops a dying terminal from nilling the live one's feed — which
+        /// leaves a session still running, still taking keystrokes, and a blank screen.
+        private var token = 0
 
         init(store: TerminalStore) {
             self.store = store
@@ -68,9 +73,14 @@ struct TerminalSurface: UIViewRepresentable {
             // Weak: the store outlives the view (it is app-scoped, the view is per-tab),
             // and a strong capture here would keep a dismantled terminal alive and being
             // fed for the rest of the process.
-            store.install { [weak view] bytes in
+            token = store.install { [weak view] bytes in
                 view?.feed(byteArray: ArraySlice(bytes))
             }
+        }
+
+        @MainActor
+        func releaseFeed() {
+            store.release(feed: token)
         }
 
         // MARK: - TerminalViewDelegate

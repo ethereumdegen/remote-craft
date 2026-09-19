@@ -23,6 +23,7 @@ struct AgentView: View {
                                detail: "metalcraft-agent on :\(hosts.selected?.agentPort ?? 3002), preset \(hosts.selected?.agentPreset ?? "general-agent").",
                                action: ("connect", connect))
                 } else {
+                    if agent.isDown { reconnectBar }
                     transcript
                     AgentComposer(store: agent)
                 }
@@ -76,6 +77,22 @@ struct AgentView: View {
                 withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
             }
         }
+    }
+
+    /// A dropped SSE watcher cannot be recovered by typing: the stream is gone, the
+    /// composer is disabled, and nothing retries on its own. The red status bar says
+    /// something is wrong; this is the thing to do about it.
+    private var reconnectBar: some View {
+        HStack(spacing: 10) {
+            Text("the agent stream dropped")
+                .font(Theme.mono(11))
+                .foregroundStyle(Theme.dim)
+            Spacer()
+            Button("reconnect", action: connect)
+                .buttonStyle(CraftButton(tint: Theme.accent2))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     /// `awaiting_reply` with options is the agent asking a closed question. Buttons, not a

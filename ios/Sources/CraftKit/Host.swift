@@ -52,11 +52,18 @@ struct SSHHost: Codable, Identifiable, Hashable {
     /// Workshop API roots to try, in the same order and for the same reason.
     ///
     /// Plain HTTP: the agent listens on the tailnet, which is already an authenticated
-    /// encrypted network, and it ships no certificate a phone would accept. An IPv6 literal
-    /// would need brackets; a `100.x` address never is one, and a MagicDNS name never is
-    /// either, so the simple interpolation is correct for every address this app accepts.
+    /// encrypted network, and it ships no certificate a phone would accept.
     func agentBases() -> [URL] {
-        candidates().compactMap { URL(string: "http://\($0):\(agentPort)/api/v1") }
+        candidates().compactMap { address in
+            // A URL authority must bracket an IPv6 literal. A tailnet `fd7a:…` address is
+            // a perfectly good fallback to type in, and unbracketed it produces a nil URL
+            // that `compactMap` drops without a word — so the agent tab reports "this
+            // host has no address" for a host that plainly has one.
+            let authority = address.contains(":") && !address.hasPrefix("[")
+                ? "[\(address)]"
+                : address
+            return URL(string: "http://\(authority):\(agentPort)/api/v1")
+        }
     }
 
     /// Anything less than this and a connection attempt is guaranteed to fail; the editor

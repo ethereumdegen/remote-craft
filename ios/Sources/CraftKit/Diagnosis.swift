@@ -58,11 +58,21 @@ enum DialOutcome: Equatable {
 
     /// Map an error's description onto an outcome.
     ///
-    /// Order matters: an authentication failure also mentions the host, and a host-key
-    /// rejection surfaces as a connection failure one layer down, so the most specific
-    /// markers have to be tested first.
+    /// Order matters twice over.
+    ///
+    /// The SSH-level markers come first: an authentication failure also mentions the
+    /// host, and a host-key rejection surfaces as a connection failure one layer down.
+    ///
+    /// Then the *refusal and timeout* markers come before the DNS one, which is the
+    /// opposite of the obvious order and the correct one. A `NIOConnectionError`
+    /// description carries `dnsAError`, `dnsAAAAError` **and** `connectionErrors` in the
+    /// same string, so a host whose A record is missing while its AAAA resolves and then
+    /// refuses produces both markers at once. A `connectionErrors` entry can only exist
+    /// if resolution produced an address to connect to, so it is strictly the more
+    /// specific fact — and reporting a refusing or sleeping box as "MagicDNS did not
+    /// answer" sends the user to debug a resolver that is working.
     static func classify(_ text: String) -> DialOutcome {
-        if text.contains("InvalidHostKey") || text.contains("hostKeyChanged") {
+        if text.contains("hostKeyChanged") {
             return .hostKeyRejected
         }
         if text.contains("keyExchangeNegotiationFailure")
@@ -80,28 +90,38 @@ enum DialOutcome: Equatable {
             || text.contains("invalidUserAuthSignature") {
             return .publicKeyRejected
         }
-        // `SocketAddressError.unknown(host:port:)` is what a failed lookup becomes inside
-        // `NIOConnectionError.dnsAError`; getaddrinfo's own wording shows up on the
-        // simulator, which resolves through the host's resolver.
-        if text.contains("unknown(host:")
-            || text.contains("nodeNameNotFound")
-            || text.contains("Name or service not known")
-            || text.contains("hostname nor servname provided") {
-            return .nameNotResolved
-        }
         if text.contains("Connection refused") || text.contains("ECONNREFUSED") {
             return .connectionRefused
         }
         // "No route to host" is grouped with the timeouts on purpose: from the phone's
         // side both mean *nothing answered*, and the diagnoses below split that by what
         // else is known about the address rather than by which errno arrived.
-        if text.contains("connectTimeout")
+        //
+        // `Connect timeout` — capitalised, with the duration in brackets — is what
+        // `ChannelError`'s own `description` produces, and it is what a sleeping Omarchy
+        // box actually delivers here. `connectTimeout` is the reflected spelling the
+        // same case has wherever the error is printed without its `CustomStringConvertible`.
+        if text.contains("Connect timeout")
+            || text.contains("connectTimeout")
             || text.contains("ETIMEDOUT")
             || text.contains("timed out")
             || text.contains("No route to host")
             || text.contains("EHOSTUNREACH")
             || text.contains("Network is unreachable") {
             return .timedOut
+        }
+        // What a failed lookup becomes inside `NIOConnectionError`: the wrapper prefixes
+        // `DNS error:` and the payload is a `SocketAddressError.UnknownHost` carrying
+        // getaddrinfo's own wording — which on Darwin, and therefore on the simulator
+        // and the phone, is "nodename nor servname provided". `unknown(host:` is the
+        // deprecated case the same failure used to arrive as.
+        if text.contains("DNS error:")
+            || text.contains("SocketAddressError.UnknownHost")
+            || text.contains("unknown(host:")
+            || text.contains("nodeNameNotFound")
+            || text.contains("nodename nor servname provided")
+            || text.contains("Name or service not known") {
+            return .nameNotResolved
         }
         return .other(text)
     }
@@ -114,12 +134,17 @@ enum DialOutcome: Equatable {
 /// on their worst day, and it should not be reachable only by breaking a real box.
 struct ConnectionFacts: Equatable {
     var address: String = ""
+    /// The account the key was offered for. sshd answers "no such user" and "that key is
+    /// not in this user's authorized_keys" with the same refusal, so the username is part
+    /// of what a rejection means.
+    var username: String = ""
     var outcome: DialOutcome = .other("")
     /// A host key is already pinned for this address: the box has answered this phone
     /// before, so silence now means it stopped answering rather than never started.
     var everConnected: Bool = false
-    /// Dial attempts started in the last 30 seconds, this one included.
-    var attemptsInWindow: Int = 1
+    /// TCP connections this phone has opened to the box in the last 30 seconds, this one
+    /// included — the number ufw's `limit` rule counts.
+    var connectionsInWindow: Int = 1
     /// This phone's `authorized_keys` line, when it has one. Carries both the fingerprint
     /// to compare and the enrollment command to re-offer.
     var publicLine: String = ""
@@ -228,10 +253,11 @@ struct Diagnosis: Equatable {
             let mine = fingerprint.map {
                 " This phone's key is \($0) — compare it with what the box trusts."
             } ?? ""
+            let account = facts.username.isEmpty ? "the account you configured" : facts.username
             return Diagnosis(
                 cause: .keyNotAuthorized,
                 title: "the box does not know this key",
-                explanation: "sshd answered, offered publickey, and refused the one this phone sent: the key is not in ~/.ssh/authorized_keys on \(facts.address).\(mine) On the box, \(Omarchy.listAuthorizedKeys) prints every fingerprint it will accept. The enrollment command below adds this one.",
+                explanation: "sshd answered, offered publickey, and refused the one this phone sent as \(account).\(mine) Check that username before you go near the box: sshd deliberately answers a key that is not in ~/.ssh/authorized_keys and an account that does not exist with exactly the same refusal, so a typo in \(account) is indistinguishable from an unenrolled key — and enrolling will appear to work while this screen keeps failing. On the box, id -un prints the real username and \(Omarchy.listAuthorizedKeys) prints every fingerprint that account will accept. The enrollment command below adds this one.",
                 remedy: enroll)
 
         case .nameNotResolved where facts.kind == .bonjour:
@@ -252,12 +278,23 @@ struct Diagnosis: Equatable {
                 remedy: Omarchy.tailscaleAddress)
 
         case .connectionRefused, .timedOut:
-            if facts.attemptsInWindow >= DialSchedule.attemptsPerWindow {
+            if facts.connectionsInWindow >= DialSchedule.connectionsPerWindow {
                 return Diagnosis(
                     cause: .rateLimited,
                     title: "waiting — the firewall is rate-limiting",
-                    explanation: "Omarchy's SSHD setup runs ufw limit 22/tcp, and that rule bans a source address at six connections in thirty seconds. This phone has made \(facts.attemptsInWindow) in the last thirty, so the app is spacing the next attempts out to stay under the limit. It will reconnect on its own — there is nothing to do here.",
+                    explanation: "Omarchy's SSHD setup runs ufw limit 22/tcp, and that rule bans a source address at six connections in thirty seconds. This phone has opened \(facts.connectionsInWindow) in the last thirty, so the app is spacing the next ones out to stay under the limit. It will reconnect on its own — there is nothing to do here.",
                     remedy: nil)
+            }
+            if facts.outcome == .timedOut && facts.kind == .bonjour {
+                // A `.local` name off the LAN does not fail fast. The lookup goes to
+                // avahi, nothing answers it, and the attempt burns the whole connect
+                // timeout — so an off-LAN phone lands here rather than on
+                // `.nameNotResolved`, and blaming sshd would be a guess.
+                return Diagnosis(
+                    cause: .dotLocalUnresolved,
+                    title: "\(facts.address) did not answer",
+                    explanation: "Nothing answered \(facts.address) within \(Omarchy.connectTimeout) seconds, and a .local name cannot say which half failed. Either the name never resolved — avahi answers it over the local network only, so the phone and the box must be on the same Wi-Fi, not a guest one and not one end on cellular — or it resolved and the box is asleep or has SSH switched off. Check both ends are on the same network first, since that is the half this app cannot see. Putting Tailscale on the box (\(Omarchy.tailscaleMenuPath)) and using its MagicDNS name removes the ambiguity and works from anywhere.",
+                    remedy: Omarchy.hostnameCommand)
             }
             if facts.outcome == .timedOut && facts.everConnected {
                 return Diagnosis(
@@ -273,10 +310,15 @@ struct Diagnosis: Equatable {
                 remedy: enroll)
 
         case .other(let text):
+            // Framed, never bare. A `NIOConnectionError(host:…)` struct printed on its
+            // own reads as a crash the user caused; saying whose words these are and
+            // what to do with them is the difference between a failure and a bug report.
             return Diagnosis(
                 cause: .unrecognised,
                 title: "the connection failed",
-                explanation: text.isEmpty ? "The connection failed with no further detail." : text,
+                explanation: text.isEmpty
+                    ? "The connection to \(facts.address) failed and the transport gave no detail at all, which usually means the attempt was torn down from underneath — the phone changed network, or Tailscale reconnected mid-handshake. Trying again is the whole remedy."
+                    : "The connection to \(facts.address) failed in a way this app has no name for, so here is what the SSH stack said, verbatim:\n\n\(text)\n\nThat text is from swift-nio-ssh, Citadel or NIO, not from the box, and there is no command here that would fix it. If it repeats, it is worth reporting with this line in it.",
                 remedy: nil)
         }
     }

@@ -46,6 +46,7 @@ struct TerminalScreen: View {
                 // scrollback to preserve and the failure gets the whole screen.
                 DiagnosisPanel(diagnosis: diagnosis,
                                address: host.label,
+                               retrying: terminal.retrying,
                                enroll: { enrolling = true },
                                retry: { connect(host) })
             } else if terminal.state == .idle {

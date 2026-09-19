@@ -38,7 +38,14 @@ struct RemoteCraftApp: App {
             // know whether they had anything live to lose.
             switch phase {
             case .active: wake.active()
-            case .background, .inactive: wake.background()
+            case .background: wake.background()
+            case .inactive:
+                // Not a wake and not a backgrounding. `.inactive` is Control Centre, the
+                // app switcher, a call banner, a permission alert — the process keeps
+                // running and its sockets keep working. Counting it as a backgrounding
+                // made every glance at Control Centre kill the user's PTY, cwd and
+                // whatever was running in it.
+                break
             @unknown default: break
             }
         }

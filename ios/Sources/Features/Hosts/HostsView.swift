@@ -5,6 +5,8 @@ struct HostsView: View {
     @Environment(HostBook.self) private var hosts
     @Environment(KeyRing.self) private var keys
     @Environment(Navigator.self) private var navigator
+    @Environment(TerminalStore.self) private var terminal
+    @Environment(AgentStore.self) private var agent
 
     @State private var editing: SSHHost?
     @State private var enrolling = false
@@ -77,12 +79,24 @@ struct HostsView: View {
                 Button("edit") { editing = host }
                     .buttonStyle(CraftButton(tint: Theme.dim))
                 Spacer()
-                Button("delete") { hosts.delete(host) }
+                Button("delete") { delete(host) }
                     .buttonStyle(CraftButton(tint: Theme.alarm))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .panel()
+    }
+
+    /// Deleting the box the stores are pointed at has to stop them too. They hold their
+    /// own copy of the host and go on dialling it, while `selected` falls through to
+    /// whatever is left — so the user would be typing into the deleted box under the
+    /// surviving box's banner.
+    private func delete(_ host: SSHHost) {
+        if hosts.selected?.id == host.id {
+            terminal.disconnect()
+            agent.disconnect()
+        }
+        hosts.delete(host)
     }
 }
 

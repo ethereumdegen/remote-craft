@@ -211,6 +211,14 @@ final class Keepalive: ChannelInboundHandler {
     }
 }
 
+/// Charged immediately before each TCP connection, so the dial schedule counts what ufw
+/// counts. Returns how many connections this phone has opened inside the current window,
+/// which is what tells a refusal apart from a self-inflicted ban.
+///
+/// Per-address rather than per-attempt: one attempt on a host with a MagicDNS name and a
+/// pinned fallback opens two sockets, and charging one of them is how an app bans itself.
+typealias ConnectionBudget = (String) async -> Int
+
 /// Connecting, with the MagicDNS fallback actually performed rather than merely recorded,
 /// and with every failure named before it leaves this file.
 enum SSHDial {
@@ -224,13 +232,14 @@ enum SSHDial {
     /// than the last one: an unresolvable name followed by a rejected key means the user
     /// has a key problem, not a DNS problem.
     static func connect(host: SSHHost, keys: [KeyRecord],
-                        attemptsInWindow: Int) async throws -> (SSHClient, Attached) {
+                        charge: @escaping ConnectionBudget) async throws -> (SSHClient, Attached) {
         let addresses = host.candidates()
         guard !addresses.isEmpty else { throw SSHError.noAddress }
         guard let key = keys.first(where: { $0.id == host.keyID }) else { throw SSHError.noKey }
 
         var worst: Diagnosis?
         for address in addresses {
+            let inWindow = await charge(address)
             let methods = OfferedMethods(try KeyVault.authentication(for: key, username: host.username))
             let validator = TrustOnFirstUse(address: address, port: host.port)
             do {
@@ -252,15 +261,17 @@ enum SSHDial {
             } catch {
                 let diagnosis = Diagnosis.of(ConnectionFacts(
                     address: address,
+                    username: host.username,
                     outcome: outcome(of: error, validator: validator, methods: methods),
                     everConnected: validator.hadPin,
-                    attemptsInWindow: attemptsInWindow,
+                    connectionsInWindow: inWindow,
                     publicLine: key.publicLine,
                     fallbackAddress: host.fallbackAddress))
                 if diagnosis.rank >= (worst?.rank ?? -1) { worst = diagnosis }
             }
         }
-        throw SSHError.diagnosed(worst ?? Diagnosis.of(ConnectionFacts(address: addresses[0])))
+        throw SSHError.diagnosed(worst ?? Diagnosis.of(ConnectionFacts(address: addresses[0],
+                                                                      username: host.username)))
     }
 
     /// What one failed attempt observably was.
@@ -304,7 +315,7 @@ final class ShellSession {
     private(set) var isRunning = false
 
     func start(host: SSHHost, keys: [KeyRecord], cols: Int, rows: Int,
-               attemptsInWindow: Int,
+               charge: @escaping ConnectionBudget,
                sink: @escaping (ShellEvent) -> Void) {
         stop()
         userClosed = false
@@ -314,10 +325,21 @@ final class ShellSession {
         outbox = continuation
 
         runner = Task { [weak self] in
+            defer { self?.isRunning = false }
             do {
                 let (client, attached) = try await SSHDial.connect(
-                    host: host, keys: keys, attemptsInWindow: attemptsInWindow)
-                self?.client = client
+                    host: host, keys: keys, charge: charge)
+                // `runner?.cancel()` cannot abort the connect above: Citadel bridges an
+                // `EventLoopFuture` and never checks cancellation, so a disconnect made
+                // while a dial is in flight still finishes authenticating. Without this
+                // the client is assigned to a session nobody holds, opens a PTY and
+                // parks forever — a live login shell on the box that nothing will close.
+                guard let self, !self.userClosed, !Task.isCancelled else {
+                    try? await client.close()
+                    sink(.closed("closed"))
+                    return
+                }
+                self.client = client
 
                 let request = SSHChannelRequestEvent.PseudoTerminalRequest(
                     wantReply: true,
@@ -355,7 +377,7 @@ final class ShellSession {
                         }
                     }
                 }
-                sink(.closed(self?.userClosed == true ? "closed" : "the remote shell exited"))
+                sink(.closed(self.userClosed ? "closed" : "the remote shell exited"))
             } catch is CancellationError {
                 sink(.closed("closed"))
             } catch {
@@ -367,7 +389,6 @@ final class ShellSession {
                     sink(.closed(Self.describe(error)))
                 }
             }
-            self?.isRunning = false
         }
     }
 

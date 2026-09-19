@@ -10,6 +10,11 @@ import SwiftUI
 struct DiagnosisPanel: View {
     let diagnosis: Diagnosis
     let address: String
+    /// Whether a further attempt is actually scheduled. Not the same as
+    /// `diagnosis.worthRetrying`: the store stops re-dialling a failure it cannot name
+    /// after a handful of them, and a caption promising that the app keeps trying while
+    /// it has quietly stopped is worse than no caption at all — the user sits and waits.
+    var retrying: Bool = false
     var enroll: (() -> Void)?
     var retry: (() -> Void)?
 
@@ -51,8 +56,13 @@ struct DiagnosisPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .panel()
 
-                if diagnosis.worthRetrying {
-                    Text("The app keeps trying on its own, backing off so it never makes more than \(DialSchedule.attemptsPerWindow) attempts in 30 seconds — Omarchy's ufw limit rule bans at 6.")
+                if retrying {
+                    Text("The app keeps trying on its own, backing off so it never opens more than \(DialSchedule.connectionsPerWindow) connections in 30 seconds — Omarchy's ufw limit rule bans at 6.")
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.faint)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if diagnosis.worthRetrying {
+                    Text("The app has stopped retrying on its own — this failure repeated without ever naming itself. Try again above when something has changed.")
                         .font(Theme.mono(10))
                         .foregroundStyle(Theme.faint)
                         .frame(maxWidth: .infinity, alignment: .leading)

@@ -105,6 +105,13 @@ struct Workshop {
     /// `{"queued":true,"position":N}` and this turn's frames will appear on the chat's
     /// shared events channel instead. Reading the 202 body as SSE — the obvious mistake —
     /// yields one unparseable line and then silence for the entire turn.
+    ///
+    /// On a 202 this stream says "queued" and ends. Attaching to `/events` here would be
+    /// the *second* connection to a broadcast the caller already watches: every frame
+    /// folded twice, duplicate replies and tool rows, and — since a completion resolves
+    /// only the last row with its id — a gear spinning forever on the other copy. The
+    /// broadcast's `done` would also be the *previous* turn's, unlocking the composer
+    /// while this phone's message is still sitting in the queue.
     func turn(chat: String, message: String) -> AsyncThrowingStream<WorkshopFrame, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
@@ -125,16 +132,6 @@ struct Workshop {
                             as? [String: Any]
                         continuation.yield(.queued(message: "another turn is already running",
                                                    position: fields?["position"] as? Int))
-                        // The turn is real and running; its frames are on the broadcast.
-                        var events = request("chats/\(chat)/events", method: "GET")
-                        events.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                        events.timeoutInterval = 3600
-                        let (queuedBytes, queuedResponse) = try await open(events)
-                        guard queuedResponse.statusCode == 200 else {
-                            throw WorkshopError.http(status: queuedResponse.statusCode,
-                                                     detail: "while attaching to the queued turn")
-                        }
-                        try await drain(queuedBytes, into: continuation, stopAtDone: true)
                     default:
                         throw WorkshopError.http(status: response.statusCode,
                                                  detail: try await firstLine(bytes))

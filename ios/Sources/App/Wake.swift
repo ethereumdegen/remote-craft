@@ -10,39 +10,41 @@ import SwiftUI
 /// a terminal that looks attached, a status dot that says live, and a keyboard whose
 /// keystrokes go nowhere.
 ///
-/// So every return to `.active` bumps this counter, and the terminal and agent screens
-/// treat a bump as "drop what you are holding, it is probably a corpse; re-probe and
-/// re-attach". Coalescing matters because `scenePhase` also reaches `.active` for things
-/// that are not a wake at all — dismissing a sheet, closing Control Centre, the app
-/// switcher — and each of those must not tear down a healthy session.
+/// So every return to the foreground **from a real backgrounding** bumps this counter,
+/// and the terminal and agent screens treat a bump as "drop what you are holding, it is
+/// probably a corpse; re-probe and re-attach".
+///
+/// What counts is the narrow part. `scenePhase` reaches `.inactive` for every transient
+/// interruption — Control Centre, Notification Centre, the app switcher, a call banner,
+/// a permission alert — and none of those suspends the process or touches its sockets.
+/// Treating them as wakes tore down healthy PTYs, losing the user's cwd, environment and
+/// whatever was running in the foreground, and cleared `busy` in the middle of an agent
+/// turn. A timing heuristic cannot separate the two either: a session that has been up
+/// for an hour and is interrupted for two seconds clears any elapsed-time guard just as
+/// easily as a genuine overnight suspend. Only `.background` is evidence, so only
+/// `.background` is recorded.
 @MainActor
 @Observable
 final class Wake {
     private(set) var generation = 0
-    private var last = Date.distantPast
-    /// A cold launch reaches `.active` too, and it is the one activation that is not a
-    /// wake: nothing has been suspended and there is nothing to recover. Bumping there
-    /// tears down the session the launch itself just opened, which shows up as a shell
-    /// that connects, dies and reconnects before the user has touched anything.
-    private var coldStart = true
+    /// Set by `background()` and cleared by the bump it causes. Starting `false` is also
+    /// the cold-start suppression: a launch reaches `.active` without ever having been
+    /// backgrounded, and bumping there would tear down the session the launch itself
+    /// just opened — a shell that connects, dies and reconnects before the user has
+    /// touched anything.
+    private var wasBackgrounded = false
 
     /// One bump per genuine return to the foreground.
     func active() {
-        let now = Date()
-        if coldStart {
-            coldStart = false
-            last = now
-            return
-        }
-        guard now.timeIntervalSince(last) > 1.5 else { return }
-        last = now
+        guard wasBackgrounded else { return }
+        wasBackgrounded = false
         generation += 1
     }
 
-    /// Called when the app leaves the foreground, so the next `.active` always counts as a
-    /// wake however briefly the app was away — a phone that locks for ten seconds kills a
-    /// socket just as dead as one that locks overnight.
+    /// Called when the app actually leaves the foreground, so the next `.active` counts
+    /// as a wake however briefly the app was away — a phone that locks for ten seconds
+    /// kills a socket just as dead as one that locks overnight.
     func background() {
-        last = .distantPast
+        wasBackgrounded = true
     }
 }

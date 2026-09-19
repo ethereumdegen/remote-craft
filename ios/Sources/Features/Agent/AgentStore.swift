@@ -44,6 +44,14 @@ final class AgentStore {
 
     var draft = ""
 
+    /// The transcript is append-only and one long agent turn is thousands of tool rows.
+    /// This store is app-scoped and lives for the whole process, so an uncapped list is
+    /// a memory leak with a scrollbar on it.
+    static let maximumLines = 2000
+    /// Trimmed down to here rather than to the cap, so a full transcript does not
+    /// memmove two thousand rows for every frame that arrives.
+    static let keptLines = 1800
+
     private var client: Workshop?
     private var chat: String?
     /// The chat this store is attached to, read-only. Connecting is asynchronous, so
@@ -53,8 +61,27 @@ final class AgentStore {
     private var turn: Task<Void, Never>?
     private var watcher: Task<Void, Never>?
     private var bornAt = 0
+    /// Incremented for every connection this store starts or drops. `Workshop.resolve`
+    /// walks each candidate base with an eight-second timeout, so two connects — a host
+    /// switch, a double tap, a wake bump — can be in flight for sixteen seconds at once.
+    /// Without this the loser finishes last and points `client` at the previous host's
+    /// address and token while the banner shows the new one, and messages go to the
+    /// wrong box.
+    private var epoch = 0
 
-    var canSend: Bool { client != nil && !busy && !draft.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// A dropped stream leaves `client` non-nil, so `client != nil` alone would keep the
+    /// composer enabled against a watcher that is gone and a turn endpoint that will
+    /// refuse every send. A composer that takes text it cannot deliver is worse than one
+    /// that is visibly disabled next to a reconnect button.
+    var canSend: Bool {
+        guard client != nil, !busy, !isDown else { return false }
+        return !draft.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var isDown: Bool {
+        if case .down = state { return true }
+        return false
+    }
 
     // MARK: - connection
 
@@ -68,10 +95,16 @@ final class AgentStore {
         banner = "\(host.displayName):\(host.agentPort)"
         state = .working
         stopStreams()
+        epoch += 1
+        let epoch = self.epoch
 
         Task { [self] in
             do {
                 let (client, summary) = try await Workshop.resolve(host: host, token: token)
+                // Every await below is a place a newer connect can have overtaken this
+                // one. Writing `client` after that point aims the composer at the box
+                // the user just navigated away from while the banner names the new one.
+                guard epoch == self.epoch else { return }
                 self.client = client
                 banner = "\(summary) · \(client.base.host() ?? host.displayName)"
                 let id: String
@@ -79,12 +112,16 @@ final class AgentStore {
                     id = existing
                 } else {
                     id = try await client.createChat(preset: host.agentPreset)
+                    guard epoch == self.epoch else { return }
                     chat = id
                     note("chat \(id) · \(host.agentPreset)")
                 }
                 state = .up
                 watch(chat: id)
             } catch {
+                // Guarded too: a stale probe timing out must not paint the live
+                // connection red or append a problem row about a host nobody is on.
+                guard epoch == self.epoch else { return }
                 state = .down(Workshop.short(error))
                 problem(Workshop.short(error))
             }
@@ -109,6 +146,7 @@ final class AgentStore {
 
     func disconnect() {
         stopStreams()
+        epoch += 1
         client = nil
         state = .idle
         busy = false
@@ -134,19 +172,26 @@ final class AgentStore {
             return
         }
         options = []
-        lines.append(AgentLine(role: .you, text: message))
+        append(AgentLine(role: .you, text: message))
         busy = true
         phase = ""
 
         turn?.cancel()
         turn = Task { [self] in
             do {
+                var queued = false
                 for try await frame in client.turn(chat: chat, message: message) {
+                    if case .queued = frame { queued = true }
                     apply(frame)
                 }
-                // The stream ended without `done` — a dropped socket, not a finished turn.
-                // Say so and unlock, rather than leaving a composer nobody can type in.
-                if busy {
+                // A queued turn ends this stream on purpose: the agent took the message,
+                // another turn is ahead of it, and its frames — including the `done`
+                // that unlocks the composer — arrive on the watcher this store already
+                // holds. Unlocking here would hand the composer back while the message
+                // is still in the queue, and calling it an error would be a lie.
+                if busy && !queued {
+                    // No `done` and no queue: a dropped socket, not a finished turn. Say
+                    // so and unlock, rather than leaving a composer nobody can type in.
                     busy = false
                     problem("The turn stream ended without a result. Pull to reconnect.")
                 }
@@ -211,19 +256,19 @@ final class AgentStore {
             break
         case .toolStarted(let id, let name, let detail):
             phase = name
-            lines.append(AgentLine(role: .tool(running: true, failed: false),
-                                   text: name, detail: detail, callID: id))
+            append(AgentLine(role: .tool(running: true, failed: false),
+                             text: name, detail: detail, callID: id))
         case .toolCompleted(let id, let name, let detail, let failed):
             phase = ""
             if let index = lines.lastIndex(where: { $0.callID == id && !id.isEmpty }) {
                 lines[index].role = .tool(running: false, failed: failed)
                 lines[index].detail = detail
             } else {
-                lines.append(AgentLine(role: .tool(running: false, failed: failed),
-                                       text: name, detail: detail, callID: id))
+                append(AgentLine(role: .tool(running: false, failed: failed),
+                                 text: name, detail: detail, callID: id))
             }
         case .reply(let text, let awaiting, let choices):
-            if !text.isEmpty { lines.append(AgentLine(role: .agent, text: text)) }
+            if !text.isEmpty { append(AgentLine(role: .agent, text: text)) }
             options = awaiting ? choices : []
         case .phase(let name):
             phase = name
@@ -231,10 +276,10 @@ final class AgentStore {
             note(position.map { "\(message) — position \($0)" } ?? message)
         case .plan(let steps):
             guard !steps.isEmpty else { break }
-            lines.append(AgentLine(role: .note, text: "plan",
-                                   detail: steps.enumerated()
-                                       .map { "\($0.offset + 1). \($0.element)" }
-                                       .joined(separator: "\n")))
+            append(AgentLine(role: .note, text: "plan",
+                             detail: steps.enumerated()
+                                 .map { "\($0.offset + 1). \($0.element)" }
+                                 .joined(separator: "\n")))
         case .injected(let text):
             note(text.isEmpty ? "context injected" : text)
         case .done(let status):
@@ -250,11 +295,20 @@ final class AgentStore {
         }
     }
 
+    /// The one way a row reaches the transcript, so the cap cannot be forgotten at a
+    /// new call site. Trimming from the front: the newest rows are the ones on screen.
+    private func append(_ line: AgentLine) {
+        lines.append(line)
+        if lines.count > Self.maximumLines {
+            lines.removeFirst(lines.count - Self.keptLines)
+        }
+    }
+
     private func note(_ text: String) {
-        lines.append(AgentLine(role: .note, text: text))
+        append(AgentLine(role: .note, text: text))
     }
 
     private func problem(_ text: String) {
-        lines.append(AgentLine(role: .problem, text: text))
+        append(AgentLine(role: .problem, text: text))
     }
 }

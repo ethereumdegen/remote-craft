@@ -50,7 +50,18 @@ final class HostBook {
     func delete(_ host: SSHHost) {
         hosts.removeAll { $0.id == host.id }
         Keychain.delete(Secret.agentToken(host.id.uuidString))
-        for address in host.candidates() {
+        // Pins are keyed by `address:port` and hosts by UUID, so two hosts can share one
+        // pin — which is exactly what duplicating a host to fix a username produces.
+        // Forgetting a pin the survivor still reaches would silently re-TOFU it on its
+        // next connection, which is the one failure `TrustOnFirstUse` exists to prevent.
+        var stillPinned = Set<String>()
+        for survivor in hosts {
+            for address in survivor.candidates() {
+                stillPinned.insert(Secret.hostKey(address: address, port: survivor.port))
+            }
+        }
+        for address in host.candidates()
+        where !stillPinned.contains(Secret.hostKey(address: address, port: host.port)) {
             TrustOnFirstUse.forget(address: address, port: host.port)
         }
         if selectedID == host.id { selectedID = hosts.first?.id }

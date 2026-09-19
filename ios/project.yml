@@ -49,26 +49,51 @@ targets:
     dependencies:
       - package: SwiftTerm
       - package: Citadel
+    info:
+      # Written by XcodeGen from the properties below — it overwrites whatever is at
+      # this path, so the file is generated and gitignored, and this block is the
+      # source of truth. A generated-from-build-settings plist cannot express the
+      # nested App Transport Security dictionary, which is why this target has a real
+      # plist and not GENERATE_INFOPLIST_FILE.
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Remote Craft
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        # The app is dark by design, not "in dark mode" — a light-appearance system
+        # must not repaint the canvas a terminal is drawn on.
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          # This applies to RELEASE too, deliberately. metalcraft-agent serves plain
+          # HTTP on :3002 and has no certificate a phone would ever accept, and the
+          # address we reach it on is usually a pinned `100.x` tailnet literal. ATS
+          # applies to an IP literal exactly as it does to a hostname, it is not
+          # bypassed by the traffic riding a utun interface, and an IP literal cannot
+          # be written as an NSExceptionDomains entry. So without this the agent tab
+          # simply fails on every TestFlight build while working in the simulator —
+          # the worst possible shape for a bug.
+          #
+          # The exposure is bounded by what the transport already is: a tailnet is an
+          # authenticated, encrypted, ACL'd network, and the shell half of the product
+          # rides SSH with a pinned host key regardless of this setting.
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.remotecraft.ios
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Remote Craft
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
-        # The app is dark by design, not "in dark mode" — a light-appearance system must
-        # not repaint the canvas a terminal is drawn on.
-        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
-      configs:
-        # Debug builds only: a metalcraft-agent on the tailnet answers plain HTTP on
-        # :3002, and the simulator treats a tailnet address as a local one. Release
-        # builds keep App Transport Security intact — on a real device the tailnet is a
-        # utun interface and this key is not what carries it.
-        debug:
-          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
 
   # Pure logic, no box: the SSE frame parser, the host-candidate fallback order, the
   # OpenSSH public-key wire encoding, the agent transcript reducer. Fast enough to run on

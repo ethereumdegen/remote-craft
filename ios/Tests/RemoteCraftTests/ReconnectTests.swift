@@ -16,7 +16,7 @@ final class DialScheduleTests: XCTestCase {
 
         for _ in 0..<60 {
             clock = schedule.earliest(after: clock)
-            schedule.attempted(at: clock)
+            schedule.connected(at: clock)
             attempts.append(clock)
             schedule.failed()
         }
@@ -35,12 +35,60 @@ final class DialScheduleTests: XCTestCase {
 
         for _ in 0..<60 {
             clock = schedule.earliest(after: clock)
-            schedule.attempted(at: clock)
+            schedule.connected(at: clock)
             attempts.append(clock)
             schedule.succeeded()
         }
 
         assertWithinLimit(attempts)
+    }
+
+    /// The case the schedule originally got wrong, and the one that matters most on a
+    /// real Omarchy box. A host with a MagicDNS name *and* a pinned `100.x` fallback —
+    /// which the host editor pushes every user towards — opens **two** sockets per
+    /// attempt, not one. ufw counts sockets. A schedule that charged one per attempt let
+    /// three retries make six connections in fifteen seconds and banned the phone from
+    /// the box, after which the app dialled into a ban it had created itself.
+    func testATwoCandidateHostNeverExceedsTheCapInConnections() {
+        var schedule = DialSchedule()
+        var clock: TimeInterval = 0
+        var sockets: [TimeInterval] = []
+        // A failing address burns the whole connect timeout before the next is tried, so
+        // the second socket of an attempt is opened ten seconds after the first.
+        let perAddress = TimeInterval(Omarchy.connectTimeout)
+
+        for _ in 0..<40 {
+            clock = schedule.earliest(after: clock, connections: 2)
+            for address in 0..<2 {
+                let at = clock + TimeInterval(address) * perAddress
+                schedule.connected(at: at)
+                sockets.append(at)
+            }
+            clock += perAddress
+            schedule.failed()
+        }
+
+        assertWithinLimit(sockets)
+    }
+
+    /// And the same host with a user hammering "connect": every attempt succeeds
+    /// immediately, so backoff never engages and only the connection budget is holding
+    /// the line.
+    func testATwoCandidateHostIsHeldUnderTheCapWithNoBackoffToHelp() {
+        var schedule = DialSchedule()
+        var sockets: [TimeInterval] = []
+        var clock: TimeInterval = 500
+
+        for _ in 0..<40 {
+            clock = schedule.earliest(after: clock, connections: 2)
+            schedule.connected(at: clock)
+            sockets.append(clock)
+            // The first address answered, so the second is never dialled — the budget
+            // was reserved for two and only one was spent, which must not leak.
+            schedule.succeeded()
+        }
+
+        assertWithinLimit(sockets)
     }
 
     /// A user hammering the connect button is the third caller, and it goes through the
@@ -53,30 +101,30 @@ final class DialScheduleTests: XCTestCase {
 
         for _ in 0..<12 {
             let at = schedule.earliest(after: now)
-            schedule.attempted(at: at)
+            schedule.connected(at: at)
             attempts.append(at)
             schedule.succeeded()
         }
 
         assertWithinLimit(attempts)
-        XCTAssertEqual(attempts.prefix(DialSchedule.attemptsPerWindow).count,
-                       DialSchedule.attemptsPerWindow)
-        XCTAssertTrue(attempts.prefix(DialSchedule.attemptsPerWindow).allSatisfy { $0 == now },
+        XCTAssertEqual(attempts.prefix(DialSchedule.connectionsPerWindow).count,
+                       DialSchedule.connectionsPerWindow)
+        XCTAssertTrue(attempts.prefix(DialSchedule.connectionsPerWindow).allSatisfy { $0 == now },
                       "the first five taps should not be delayed at all")
     }
 
     /// The first retry is never faster than five seconds, and the wait grows.
     func testBackoffStartsAtFiveSecondsAndDoubles() {
         var schedule = DialSchedule()
-        schedule.attempted(at: 0)
+        schedule.connected(at: 0)
         schedule.failed()
         XCTAssertEqual(schedule.earliest(after: 0), 5)
 
-        schedule.attempted(at: 5)
+        schedule.connected(at: 5)
         schedule.failed()
         XCTAssertEqual(schedule.earliest(after: 5), 15)
 
-        schedule.attempted(at: 15)
+        schedule.connected(at: 15)
         schedule.failed()
         XCTAssertEqual(schedule.earliest(after: 15), 35)
     }
@@ -88,7 +136,7 @@ final class DialScheduleTests: XCTestCase {
         var clock: TimeInterval = 0
         for _ in 0..<20 {
             clock = schedule.earliest(after: clock)
-            schedule.attempted(at: clock)
+            schedule.connected(at: clock)
             schedule.failed()
         }
 
@@ -98,9 +146,9 @@ final class DialScheduleTests: XCTestCase {
     /// A success clears the backoff, because a connection that worked is new information.
     func testSuccessResetsTheBackoff() {
         var schedule = DialSchedule()
-        schedule.attempted(at: 0)
+        schedule.connected(at: 0)
         schedule.failed()
-        schedule.attempted(at: 5)
+        schedule.connected(at: 5)
         schedule.failed()
         schedule.succeeded()
 
@@ -114,7 +162,7 @@ final class DialScheduleTests: XCTestCase {
         for start in attempts {
             let inWindow = attempts.filter { $0 >= start && $0 <= start + DialSchedule.window }
             XCTAssertLessThanOrEqual(
-                inWindow.count, DialSchedule.attemptsPerWindow,
+                inWindow.count, DialSchedule.connectionsPerWindow,
                 "\(inWindow.count) attempts inside the 30s window starting at \(start)",
                 file: file, line: line)
         }

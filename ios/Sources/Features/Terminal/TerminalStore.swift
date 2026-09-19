@@ -29,10 +29,37 @@ final class TerminalStore {
     /// Whether a PTY has ever opened for the current host. Until it has, there is no
     /// scrollback worth showing and the failure belongs on the whole screen.
     private(set) var everOpened = false
+    /// Whether another attempt is actually scheduled. The failure screen reads this
+    /// rather than `Diagnosis.worthRetrying`, because the two diverge: the loop gives up
+    /// on a failure it cannot name, and a screen that keeps promising to retry after it
+    /// has stopped leaves the user waiting for something that will not happen.
+    private(set) var retrying = false
+
+    /// Bytes buffered before a view exists are capped: `deliver` has no feed during the
+    /// whole diagnosis/idle branch, and a `yes` or a `cargo build` in the remote shell
+    /// would otherwise grow this until jetsam kills the app. A quarter-megabyte is more
+    /// scrollback than a phone screen can show; dropping the oldest of it is what a
+    /// terminal does anyway.
+    static let backlogCap = 256 * 1024
+    /// Trimmed down to here rather than to the cap, so a full buffer does not memmove a
+    /// quarter-megabyte for every chunk that arrives.
+    static let backlogKeep = 192 * 1024
+    /// How many failures this app could not name in a row before the retry loop gives up.
+    /// `.unrecognised` is worth retrying — a flap during a handshake produces one — but
+    /// an unnamed failure that keeps repeating is not going to name itself, and a loop
+    /// that dials forever against it spends the firewall's patience for nothing. The
+    /// reconnect button is the way out.
+    static let unknownFailureLimit = 5
 
     private let session = ShellSession()
     /// Installed by `TerminalSurface` once the UIKit view exists.
     private var feed: (([UInt8]) -> Void)?
+    /// Identifies the current feed. SwiftUI does not guarantee that the old view is
+    /// dismantled before the new one is made, so on a host change or a palette change the
+    /// outgoing view's `dismantleUIView` can run *after* the incoming view has installed
+    /// its feed. Releasing by token means a stale dismantle is ignored rather than
+    /// blanking a live terminal for the rest of the process.
+    private var feedToken = 0
     private var backlog: [UInt8] = []
     private var host: SSHHost?
     private var keys: [KeyRecord] = []
@@ -44,6 +71,9 @@ final class TerminalStore {
     /// epoch they were created under so a dead session cannot narrate over a live one.
     private var epoch = 0
     private var schedule = DialSchedule()
+    /// Consecutive failures this app had no name for, reset by anything it could name
+    /// and by a connection that worked.
+    private var unknownFailures = 0
     /// The pending dial, whether it is waiting out a backoff or already running.
     private var pending: Task<Void, Never>?
 
@@ -51,15 +81,23 @@ final class TerminalStore {
 
     // MARK: - view wiring
 
-    func install(feed: @escaping ([UInt8]) -> Void) {
+    /// Install the sink the terminal view draws with, and hand back the token that
+    /// identifies it. Pass the token to `release(feed:)` on dismantle.
+    func install(feed: @escaping ([UInt8]) -> Void) -> Int {
+        feedToken += 1
         self.feed = feed
         if !backlog.isEmpty {
             feed(backlog)
             backlog.removeAll(keepingCapacity: false)
         }
+        return feedToken
     }
 
-    func releaseFeed() { feed = nil }
+    /// Drop the feed, but only if it is still the one the caller installed.
+    func release(feed token: Int) {
+        guard token == feedToken else { return }
+        feed = nil
+    }
 
     // MARK: - session
 
@@ -78,6 +116,7 @@ final class TerminalStore {
         self.bornAt = generation
         banner = host.label
         diagnosis = nil
+        unknownFailures = 0
         schedule.succeeded()
         dial()
     }
@@ -86,6 +125,7 @@ final class TerminalStore {
         epoch += 1
         pending?.cancel()
         pending = nil
+        retrying = false
         diagnosis = nil
         session.stop()
         state = .idle
@@ -123,13 +163,24 @@ final class TerminalStore {
     /// the box's own firewall — is worth knowing.
     private func dial() {
         guard let host else { return }
+        // Before anything else, and in particular before the backoff below. Bumping the
+        // epoch makes `handle` discard everything the old session says, so a session
+        // left running would go on filling a screen nobody repaints while `send(_:)`
+        // kept forwarding keystrokes into its still-open outbox — the user typing blind
+        // into a live remote shell for up to half a minute. `stop()` is idempotent.
+        session.stop()
         epoch += 1
         let epoch = self.epoch
         let now = Date.timeIntervalSinceReferenceDate
-        let start = schedule.earliest(after: now)
+        // One attempt opens one socket per candidate address, and ufw counts sockets.
+        // Reserving the whole block up front is what stops a host with a fallback from
+        // spending the budget twice as fast as the schedule believes.
+        let connections = max(1, host.candidates().count)
+        let start = schedule.earliest(after: now, connections: connections)
         let wait = start - now
 
         pending?.cancel()
+        retrying = true
         state = .working
         if wait > 0 {
             write(note: "next attempt in \(Int(wait.rounded()))s — Omarchy's ufw limit bans at 6 connections per 30s")
@@ -140,16 +191,25 @@ final class TerminalStore {
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             }
             guard !Task.isCancelled, let self, self.epoch == epoch else { return }
-            let at = Date.timeIntervalSinceReferenceDate
-            self.schedule.attempted(at: at)
             self.session.start(host: host,
                                keys: self.keys,
                                cols: self.size.cols,
                                rows: self.size.rows,
-                               attemptsInWindow: self.schedule.attemptsInWindow(at: at)) { [weak self] event in
+                               charge: { [weak self] _ in
+                                   // Only nil once the store is gone, which means nothing
+                                   // will render the diagnosis anyway: count this socket.
+                                   await self?.charge() ?? 1
+                               }) { [weak self] event in
                 self?.handle(event, epoch: epoch)
             }
         }
+    }
+
+    /// Record one socket about to be opened and say how many are now in the window.
+    private func charge() -> Int {
+        let at = Date.timeIntervalSinceReferenceDate
+        schedule.connected(at: at)
+        return schedule.connectionsInWindow(at: at)
     }
 
     private func handle(_ event: ShellEvent, epoch: Int) {
@@ -162,6 +222,8 @@ final class TerminalStore {
             state = .up
             everOpened = true
             diagnosis = nil
+            retrying = false
+            unknownFailures = 0
             schedule.succeeded()
             if let host, attached.address != host.address, !host.address.isEmpty {
                 // Worth saying out loud: the MagicDNS name did not work and the pinned
@@ -177,10 +239,12 @@ final class TerminalStore {
         case .data(let bytes):
             deliver(bytes)
         case .closed(let reason):
+            retrying = false
             state = reason == "closed" ? .idle : .down(reason)
             write(note: reason)
         case .failed(let failure):
             schedule.failed()
+            unknownFailures = failure.cause == .unrecognised ? unknownFailures + 1 : 0
             diagnosis = failure
             state = .down(failure.title)
             write(note: failure.title)
@@ -189,15 +253,27 @@ final class TerminalStore {
             }
             // Retrying a refused key only spends the firewall's patience; retrying a box
             // someone is walking over to enable SSH on is the whole point of the loop.
-            if failure.worthRetrying { dial() }
+            // An unnamed failure that keeps repeating is in the first category however
+            // much it looks like the second, so the loop stops and says so.
+            if failure.worthRetrying, unknownFailures < Self.unknownFailureLimit {
+                dial()
+                return
+            }
+            retrying = false
+            if failure.worthRetrying {
+                write(note: "stopping after \(unknownFailures) failures this app cannot name — use reconnect to try again")
+            }
         }
     }
 
     private func deliver(_ bytes: [UInt8]) {
         if let feed {
             feed(bytes)
-        } else {
-            backlog.append(contentsOf: bytes)
+            return
+        }
+        backlog.append(contentsOf: bytes)
+        if backlog.count > Self.backlogCap {
+            backlog.removeFirst(backlog.count - Self.backlogKeep)
         }
     }
 
