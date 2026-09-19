@@ -32,7 +32,7 @@ packages:
 settings:
   base:
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2"
     # 5.0, not 6.0: the app is a thin shell over two callback-shaped C-and-NIO libraries
     # (SwiftTerm's UIKit delegates, Citadel's channel handlers) that predate Sendable.
     # @MainActor isolation already gives us what strict concurrency would police here,
