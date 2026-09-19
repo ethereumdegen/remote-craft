@@ -39,6 +39,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// to hammer a box that is rebooting, short enough that an agent-initiated
 /// turn is not missed for a whole minute.
 const WATCH_RETRY: Duration = Duration::from_secs(3);
+/// How long a stream may go without a single byte before it is treated as
+/// dead. The pod sends `:` keep-alive comments, so silence this long means
+/// the connection is gone rather than the agent being slow.
+const STREAM_IDLE: Duration = Duration::from_secs(120);
 
 /// What the background streaming tasks report back to the command loop.
 enum Wire {
@@ -66,6 +70,14 @@ pub async fn run(spec: Spec, ui: Ui, mut commands: UnboundedReceiver<AgentCmd>) 
 
     let http = Client::builder()
         .user_agent(concat!("remote-craft/", env!("CARGO_PKG_VERSION")))
+        // A whole-request timeout would truncate a legitimately long turn, so
+        // the streaming calls carry none. These two bound the failures that
+        // are not "the agent is thinking": a pod that completes the TCP
+        // handshake and then never sends headers, and a tailnet route that
+        // black-holes mid-stream. Without them the turn task parks forever,
+        // no `done` ever arrives, and the composer stays locked.
+        .connect_timeout(CALL_TIMEOUT)
+        .read_timeout(STREAM_IDLE)
         .build()
         .context("building the HTTP client")?;
 
@@ -119,6 +131,7 @@ pub async fn run(spec: Spec, ui: Ui, mut commands: UnboundedReceiver<AgentCmd>) 
         base.clone(),
         token.clone(),
         chat_id.clone(),
+        ui.clone(),
         tx.clone(),
     ));
     let mut turn: Option<JoinHandle<()>> = None;
@@ -156,6 +169,7 @@ pub async fn run(spec: Spec, ui: Ui, mut commands: UnboundedReceiver<AgentCmd>) 
                                     base.clone(),
                                     token.clone(),
                                     chat_id.clone(),
+                                    ui.clone(),
                                     tx.clone(),
                                 ));
                             }
@@ -305,29 +319,65 @@ async fn decode(response: Response, what: &str) -> Result<Value> {
         .with_context(|| format!("{what}: the response was not JSON"))
 }
 
-/// Start (and keep) the idle watch stream, so a turn the agent begins on its
-/// own — a scheduled job, another client — still shows up here.
+/// Hold the long-lived `/events` stream open so agent-initiated turns appear
+/// while the user is idle.
 fn start_watch(
     http: Client,
     base: String,
     token: String,
     chat: String,
+    ui: Ui,
     tx: UnboundedSender<Wire>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let url = format!("{base}/chats/{chat}/events");
+        // Report a persistently broken watch once rather than every three
+        // seconds. Retrying in total silence meant a rotated token, a pod too
+        // old to have `/events`, or a dead service all looked like a connected
+        // agent that simply never said anything again.
+        let mut complained = false;
         loop {
-            let opened = http
+            match http
                 .get(&url)
                 .bearer_auth(&token)
                 .header(ACCEPT, "text/event-stream")
                 .send()
-                .await;
-            if let Ok(response) = opened
-                && response.status().is_success()
+                .await
             {
-                // `done` is not terminal here: the watch outlives every turn.
-                let _ = pump(response, &tx, false).await;
+                Ok(response) if response.status().is_success() => {
+                    complained = false;
+                    // `done` is not terminal here: the watch outlives every turn.
+                    let _ = pump(response, &tx, false).await;
+                }
+                Ok(response) => {
+                    if !complained {
+                        complained = true;
+                        let status = response.status();
+                        let detail = if status == StatusCode::NOT_FOUND {
+                            " — this pod has no /events route, so agent-initiated turns will not appear"
+                        } else {
+                            ""
+                        };
+                        fail(
+                            &ui,
+                            Scope::Agent,
+                            format!(
+                                "the agent event stream returned HTTP {}{detail}",
+                                status.as_u16()
+                            ),
+                        );
+                    }
+                }
+                Err(error) => {
+                    if !complained {
+                        complained = true;
+                        fail(
+                            &ui,
+                            Scope::Agent,
+                            format!("the agent event stream dropped: {error}"),
+                        );
+                    }
+                }
             }
             if tx.is_closed() {
                 return;
@@ -670,7 +720,7 @@ fn summarize(body: &str) -> String {
     }
 }
 
-fn clamp(text: &str) -> String {
+pub(crate) fn clamp(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > 160 {
         let cut: String = flat.chars().take(157).collect();

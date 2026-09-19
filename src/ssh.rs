@@ -137,8 +137,10 @@ impl client::Handler for Client {
     ///   and it is a different key. This is the mismatch case, the only one
     ///   that must fail hard, and it names the offending line so the user can
     ///   fix `known_hosts`.
-    /// * `Ok(false)` — nothing recorded for this host/algorithm. Unknown, not
-    ///   wrong: learn it and continue.
+    /// * `Ok(false)` — nothing recorded **for this algorithm**. That is only
+    ///   an unknown host if the host has no recorded keys at all; if it has
+    ///   some under other algorithms, this is a downgrade attempt and is
+    ///   refused.
     ///
     /// The file read is synchronous. It is a few kilobytes off local disk once
     /// per connection, which is cheaper than moving it to a blocking pool.
@@ -160,7 +162,35 @@ impl client::Handler for Client {
                 // `Error::UnknownKey`; `connect` swaps in the message above.
                 Ok(false)
             }
-            Ok(false) => self.learn(&key),
+            Ok(false) => {
+                // `check_known_hosts` matches per algorithm, so a server that
+                // offers `ecdsa-sha2-nistp256` against a box pinned as
+                // `ssh-ed25519` lands here rather than in `KeyChanged`.
+                // Treating that as "unknown" would let anything on the path
+                // pick an algorithm we have not pinned, get trusted in silence
+                // and append its own known_hosts line — the pin would be
+                // decorative. If we hold any key for this host, a new
+                // algorithm is a change, not a first sighting.
+                match known_hosts::known_host_keys(&self.host, self.port) {
+                    Ok(recorded) if !recorded.is_empty() => {
+                        let known: Vec<String> = recorded
+                            .iter()
+                            .map(|(_, key)| key.algorithm().as_str().to_string())
+                            .collect();
+                        self.record(format!(
+                            "{}:{} offered a host key of type {}, but ~/.ssh/known_hosts already pins it as {}. \
+                             A host that suddenly changes key type is either reinstalled or impersonated — \
+                             remove the recorded line only if you know which.",
+                            self.host,
+                            self.port,
+                            key.algorithm().as_str(),
+                            known.join(", ")
+                        ));
+                        Ok(false)
+                    }
+                    _ => self.learn(&key),
+                }
+            }
             // Any other error means known_hosts could not be consulted at all
             // (no home directory, unreadable file). That is the unknown-host
             // case too: try to learn, and accept if we cannot.

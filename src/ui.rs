@@ -361,7 +361,8 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let view = main.height.saturating_sub(2);
     let total = lines.len() as u16;
-    let offset = total.saturating_sub(view).min(app.scroll);
+    // `app.scroll` is lines above the bottom, so zero follows the tail.
+    let offset = total.saturating_sub(view).saturating_sub(app.scroll);
     let title = match &app.agent_name {
         Some(name) => format!(" {name} "),
         None => " AGENT ".to_string(),

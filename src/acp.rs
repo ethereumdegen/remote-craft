@@ -283,6 +283,11 @@ struct Acp<W: Sink> {
     /// Prompts typed before `session/new` came back. Dropping them would make
     /// the first message after connecting disappear.
     queued: VecDeque<String>,
+    /// Set once the agent has refused, or failed, to give us a session. There
+    /// is no retry: without a session there is nothing to prompt, so anything
+    /// still queued has to be failed rather than held. Left unset, a bad
+    /// `cwd` in config.json locks the composer and spins the spinner forever.
+    doomed: bool,
     turn: bool,
 }
 
@@ -297,6 +302,7 @@ impl<W: Sink> Acp<W> {
             permissions: HashMap::new(),
             session: None,
             queued: VecDeque::new(),
+            doomed: false,
             turn: false,
         }
     }
@@ -408,6 +414,9 @@ impl<W: Sink> Acp<W> {
                     reason: "failed".into(),
                 });
             }
+            if matches!(want, Want::Initialize | Want::NewSession) {
+                self.abandon();
+            }
             return Ok(());
         }
 
@@ -448,6 +457,7 @@ impl<W: Sink> Acp<W> {
                         Scope::Agent,
                         "the agent opened a session but did not name it; the remote `omp` is too old for this client",
                     );
+                    self.abandon();
                     return Ok(());
                 };
                 self.session = Some(id.to_string());
@@ -589,6 +599,8 @@ impl<W: Sink> Acp<W> {
             AgentCmd::Prompt(text) => {
                 if self.session.is_some() {
                     self.send_prompt(text).await?;
+                } else if self.doomed {
+                    self.reject(text);
                 } else {
                     self.queued.push_back(text);
                 }
@@ -609,7 +621,11 @@ impl<W: Sink> Acp<W> {
 
     async fn send_prompt(&mut self, text: String) -> Result<()> {
         let Some(session) = self.session.clone() else {
-            self.queued.push_back(text);
+            if self.doomed {
+                self.reject(text);
+            } else {
+                self.queued.push_back(text);
+            }
             return Ok(());
         };
         self.turn = true;
@@ -622,6 +638,31 @@ impl<W: Sink> Acp<W> {
             Want::Prompt,
         )
         .await
+    }
+
+    /// There will never be a session on this connection. Fail everything that
+    /// was waiting for one, so the composer unlocks instead of spinning.
+    fn abandon(&mut self) {
+        self.doomed = true;
+        let waiting = std::mem::take(&mut self.queued);
+        for text in waiting {
+            self.reject(text);
+        }
+    }
+
+    /// Tell the UI that a prompt it already drew as sent is not going anywhere.
+    fn reject(&mut self, text: String) {
+        fail(
+            &self.ui,
+            Scope::Agent,
+            format!(
+                "not sent — this agent never opened a session: {}",
+                crate::workshop::clamp(&text)
+            ),
+        );
+        let _ = self.ui.send(Msg::AgentTurnEnd {
+            reason: "failed".into(),
+        });
     }
 
     async fn answer(&mut self, id: &str, choice: &str) -> Result<()> {
@@ -756,14 +797,22 @@ mod tests {
         async fn shutdown(&self) {}
     }
 
-    fn harness() -> (Acp<Recorder>, Recorder, std::sync::mpsc::Receiver<Msg>) {
+    fn harness() -> (
+        Acp<Recorder>,
+        Recorder,
+        std::sync::mpsc::Receiver<(u64, Msg)>,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         let recorder = Recorder::default();
-        (Acp::new(spec(), tx, recorder.clone()), recorder, rx)
+        (
+            Acp::new(spec(), Ui::new(tx, 1), recorder.clone()),
+            recorder,
+            rx,
+        )
     }
 
-    fn seen(rx: &std::sync::mpsc::Receiver<Msg>) -> Vec<Msg> {
-        rx.try_iter().collect()
+    fn seen(rx: &std::sync::mpsc::Receiver<(u64, Msg)>) -> Vec<Msg> {
+        rx.try_iter().map(|(_, msg)| msg).collect()
     }
 
     #[tokio::test]
@@ -870,6 +919,60 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(&seen(&rx)[..], [Msg::AgentTurnEnd { reason }] if reason == "completed"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_session_fails_the_queue_instead_of_holding_it() {
+        // A stale `cwd` in config.json makes `omp acp` refuse the session.
+        // The prompt the user already typed must come back as failed, or the
+        // composer stays locked and the spinner spins for the whole session.
+        let (mut acp, _sent, rx) = harness();
+        acp.initialize().await.unwrap();
+        let init_id = json!(1);
+        acp.handle_cmd(AgentCmd::Prompt("hello".into()))
+            .await
+            .unwrap();
+
+        acp.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "protocolVersion": 1, "agentInfo": { "name": "omp" } },
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let _ = seen(&rx);
+
+        acp.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": { "code": -32000, "message": "no such directory: /gone" },
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let msgs = seen(&rx);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Msg::AgentTurnEnd { reason } if reason == "failed")),
+            "the queued prompt must end a turn, got {msgs:?}"
+        );
+
+        // And a prompt typed afterwards is refused rather than queued forever.
+        acp.handle_cmd(AgentCmd::Prompt("again".into()))
+            .await
+            .unwrap();
+        let msgs = seen(&rx);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Msg::AgentTurnEnd { reason } if reason == "failed")),
+            "a later prompt is refused too, got {msgs:?}"
+        );
     }
 
     #[tokio::test]

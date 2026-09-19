@@ -8,7 +8,7 @@
 //! is still responsive enough to quit.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -26,6 +26,12 @@ use crate::term::{self, Term};
 /// the status bar are the entire diagnostic surface, so it has to be long
 /// enough to hold a failed connection attempt and short enough to stay cheap.
 const LOG_CAP: usize = 500;
+
+/// How many transcript blocks to keep. `render_agent` rebuilds a styled line
+/// per block on every frame, at least twenty times a second, so an unbounded
+/// transcript costs memory *and* makes the shell pane progressively less
+/// responsive over a long session.
+const TRANSCRIPT_CAP: usize = 2_000;
 
 /// The prefix key that escapes from the remote terminal, borrowed from screen
 /// and tmux because the muscle memory already exists. Without it there is no
@@ -110,6 +116,33 @@ pub struct Permission {
     pub prompt: String,
     pub options: Vec<String>,
     pub selected: usize,
+    /// The input mode the modal interrupted. A tool gate can fire while the
+    /// user is typing into the remote PTY, and dumping them into Normal
+    /// afterwards means their next keystrokes silently go nowhere.
+    pub resume: Mode,
+}
+
+/// The index of the option that refuses, or one past the end when none of them
+/// obviously does.
+///
+/// Scanning for "no" as a substring is what a careless version of this does,
+/// and "Allow now" contains it — so Esc would approve the very thing the gate
+/// exists to stop. Match whole words instead, and when nothing matches return
+/// an out-of-range index, which the ACP layer turns into a proper `cancelled`
+/// outcome rather than a guess.
+fn deny_index(options: &[String]) -> usize {
+    options
+        .iter()
+        .position(|option| {
+            option.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                let word = word.to_ascii_lowercase();
+                matches!(
+                    word.as_str(),
+                    "deny" | "reject" | "no" | "cancel" | "decline"
+                )
+            })
+        })
+        .unwrap_or(options.len())
 }
 
 pub struct App {
@@ -157,8 +190,14 @@ pub struct App {
     pub spin: usize,
 
     runtime: Runtime,
-    ui: Ui,
-    inbox: Receiver<Msg>,
+    outbox: Sender<(u64, Msg)>,
+    inbox: Receiver<(u64, Msg)>,
+    /// Monotonic session counter. Every worker is stamped with the value
+    /// current when it was spawned, and `shell_epoch`/`agent_epoch` record
+    /// which stamps are still wanted.
+    epoch: u64,
+    shell_epoch: u64,
+    agent_epoch: u64,
 }
 
 impl App {
@@ -168,7 +207,7 @@ impl App {
             .enable_all()
             .build()
             .context("starting the async runtime")?;
-        let (ui, inbox) = mpsc::channel();
+        let (outbox, inbox) = mpsc::channel();
         let (cols, rows) = crate::ui::shell_size(size.0, size.1);
 
         let mut app = App {
@@ -202,8 +241,11 @@ impl App {
             log_scroll: 0,
             spin: 0,
             runtime,
-            ui,
+            outbox,
             inbox,
+            epoch: 0,
+            shell_epoch: 0,
+            agent_epoch: 0,
         };
         app.reload();
         // Land on the configured default rather than whatever sorts first, so
@@ -274,7 +316,8 @@ impl App {
     pub fn tick(&mut self) {
         loop {
             match self.inbox.try_recv() {
-                Ok(msg) => self.apply(msg),
+                Ok((epoch, msg)) if self.wanted(epoch, &msg) => self.apply(msg),
+                Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -282,6 +325,48 @@ impl App {
         if self.agent_busy || (self.shell.is_some() && !self.shell_live) {
             self.spin = self.spin.wrapping_add(1);
         }
+    }
+
+    /// Is this message still about a session the user is looking at?
+    ///
+    /// A worker is asked to stop but keeps running until it notices, and it
+    /// reports its own death on the way out. Without this, closing shell A and
+    /// opening shell B means A's `ShellClosed` arrives after B is installed and
+    /// closes B — B connects and then dies, while the header still says live.
+    fn wanted(&self, epoch: u64, msg: &Msg) -> bool {
+        match msg {
+            Msg::ShellOpened { .. } | Msg::ShellData(_) | Msg::ShellClosed { .. } => {
+                epoch == self.shell_epoch
+            }
+            Msg::AgentConnected { .. }
+            | Msg::AgentSession { .. }
+            | Msg::AgentDelta { .. }
+            | Msg::AgentThought { .. }
+            | Msg::AgentReply { .. }
+            | Msg::AgentTool { .. }
+            | Msg::AgentPlan { .. }
+            | Msg::AgentTurnEnd { .. }
+            | Msg::AgentPermission { .. } => epoch == self.agent_epoch,
+            // A failure or a log line is scoped, not session-bound: the whole
+            // point of one is to explain a session that is already going away.
+            Msg::Failed { scope, .. } | Msg::Log(LogLine { scope, .. }) => match scope {
+                Scope::Shell => epoch == self.shell_epoch,
+                Scope::Agent => epoch == self.agent_epoch,
+            },
+        }
+    }
+
+    /// Mint the sender for a new shell session and retire the previous one.
+    fn shell_ui(&mut self) -> Ui {
+        self.epoch += 1;
+        self.shell_epoch = self.epoch;
+        Ui::new(self.outbox.clone(), self.epoch)
+    }
+
+    fn agent_ui(&mut self) -> Ui {
+        self.epoch += 1;
+        self.agent_epoch = self.epoch;
+        Ui::new(self.outbox.clone(), self.epoch)
     }
 
     pub(crate) fn apply(&mut self, msg: Msg) {
@@ -312,6 +397,7 @@ impl App {
                 self.push_log(Scope::Agent, format!("{agent}: {detail}"));
                 self.transcript.push(Block::Notice(detail));
                 self.set_status(format!("connected to {agent}"));
+                self.stick();
             }
             Msg::AgentSession { id } => {
                 self.push_log(Scope::Agent, format!("session {id}"));
@@ -354,15 +440,15 @@ impl App {
                 state,
                 detail,
             } => {
-                // Collapse a completion onto the row its own call started, so a
-                // long tool run is one line that changes state. Matching on the
-                // call id rather than the name matters the moment an agent runs
-                // two `bash` calls at once: by name, the second completion would
-                // land on the first row and one call would never resolve.
-                let existing = self.transcript.iter_mut().rev().find(|block| {
-                    matches!(block, Block::Tool { id: seen, state, .. }
-                        if seen == &id && *state == ToolState::Started)
-                });
+                // Match on the call id alone. Agents send further updates after
+                // a call resolves — a `completed` status and then the result
+                // text — and requiring the row to still be `Started` made every
+                // one of those push a duplicate row for the same call.
+                let existing = self
+                    .transcript
+                    .iter_mut()
+                    .rev()
+                    .find(|block| matches!(block, Block::Tool { id: seen, .. } if seen == &id));
                 if let Some(Block::Tool {
                     state: seen_state,
                     detail: seen_detail,
@@ -397,17 +483,25 @@ impl App {
                 self.permission = Some(Permission {
                     id,
                     prompt,
+                    // Start on the safe option, not on index 0. The modal
+                    // appears asynchronously, and a user pressing Enter for
+                    // something else entirely must not thereby approve a shell
+                    // command they never read.
+                    selected: deny_index(&options),
                     options,
-                    selected: 0,
+                    resume: self.mode,
                 });
                 self.mode = Mode::Permission;
             }
 
             Msg::Failed { scope, error } => {
                 self.push_log(scope, error.clone());
-                if scope == Scope::Agent {
-                    self.agent_busy = false;
-                }
+                // Deliberately not clearing `agent_busy`: a failure is not
+                // necessarily the end of a turn. The Workshop back end sends a
+                // retryable error mid-turn and keeps streaming, and unlocking
+                // here let the user send a follow-up that the worker then
+                // queued invisibly behind the turn still running. Every back
+                // end guarantees a terminal `AgentTurnEnd` on the fatal paths.
                 self.status = error.clone();
                 self.status_is_error = true;
                 self.last_error = Some(error);
@@ -428,10 +522,16 @@ impl App {
         self.log.truncate(LOG_CAP);
     }
 
-    /// Keep the transcript pinned to the bottom unless the user scrolled away.
+    /// Keep the transcript pinned to the bottom unless the user scrolled away,
+    /// and drop the oldest blocks once it outgrows the cap. Every path that
+    /// appends calls this, so it is the one place the bound has to hold.
     fn stick(&mut self) {
+        if self.transcript.len() > TRANSCRIPT_CAP {
+            let overflow = self.transcript.len() - TRANSCRIPT_CAP;
+            self.transcript.drain(..overflow);
+        }
         if self.follow {
-            self.scroll = u16::MAX;
+            self.scroll = 0;
         }
     }
 
@@ -462,12 +562,13 @@ impl App {
         self.last_error = None;
         self.shell_host = Some(name.to_string());
         self.set_status(format!("connecting to {}…", target.label()));
+        let ui = self.shell_ui();
         self.shell = Some(ssh::spawn_shell(
             self.runtime.handle(),
             target,
             cols,
             rows,
-            self.ui.clone(),
+            ui,
         ));
         self.page = Page::Shell;
         self.mode = Mode::Capture;
@@ -489,7 +590,8 @@ impl App {
         self.agent_busy = false;
         self.agent_name = Some(name.to_string());
         self.set_status(format!("connecting to {name}…"));
-        self.agent = Some(agent::spawn(self.runtime.handle(), spec, self.ui.clone()));
+        let ui = self.agent_ui();
+        self.agent = Some(agent::spawn(self.runtime.handle(), spec, ui));
         self.page = Page::Agent;
         self.mode = Mode::Normal;
         self.follow = true;
@@ -693,26 +795,36 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('i') | KeyCode::Char('a') => {
-                if self.agent.is_some() {
-                    self.mode = Mode::Compose;
-                } else {
+                if self.agent.is_none() {
                     self.set_status("no agent — pick one first");
+                } else if self.agent_busy {
+                    // Nothing downstream can take a second prompt: exec drops
+                    // it, Workshop defers it out of sight, ACP starts a second
+                    // concurrent turn. Refusing here is the only place the
+                    // user finds out.
+                    self.set_status("a turn is running — s to stop it first");
+                } else {
+                    self.mode = Mode::Compose;
                 }
             }
             KeyCode::Esc | KeyCode::Left => self.page = Page::Hosts,
             KeyCode::Char('c') if ctrl => self.interrupt(),
             KeyCode::Char('s') => self.interrupt(),
-            KeyCode::Char('j') | KeyCode::Down => {
+            // `scroll` counts lines *above the bottom*, so following is simply
+            // zero. Storing an absolute offset and parking it at u16::MAX while
+            // following meant `k` decremented 65535 and the clamp still drew
+            // the bottom — the key appeared to do nothing at all.
+            KeyCode::Char('k') | KeyCode::Up => {
                 self.follow = false;
                 self.scroll = self.scroll.saturating_add(1);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.follow = false;
+            KeyCode::Char('j') | KeyCode::Down => {
                 self.scroll = self.scroll.saturating_sub(1);
+                self.follow = self.scroll == 0;
             }
             KeyCode::Char('G') | KeyCode::End => {
                 self.follow = true;
-                self.scroll = u16::MAX;
+                self.scroll = 0;
             }
             KeyCode::Char(digit @ '1'..='9') => {
                 // The agent offered choices; pick one without typing it out.
@@ -785,14 +897,7 @@ impl App {
             KeyCode::Esc => {
                 // Refusing is a decision too, and it is the safe one. Leaving
                 // the modal without answering would hang the remote turn.
-                permission.selected = permission
-                    .options
-                    .iter()
-                    .position(|option| {
-                        let lower = option.to_lowercase();
-                        lower.contains("deny") || lower.contains("reject") || lower.contains("no")
-                    })
-                    .unwrap_or(permission.options.len().saturating_sub(1));
+                permission.selected = deny_index(&permission.options);
                 self.answer_permission();
             }
             _ => {}
@@ -813,7 +918,7 @@ impl App {
         }
         self.transcript
             .push(Block::Notice(format!("permission: {choice}")));
-        self.mode = Mode::Normal;
+        self.mode = permission.resume;
         self.stick();
     }
 
@@ -865,6 +970,13 @@ impl App {
         if let Some(agent) = self.agent.take() {
             agent.close();
         }
+        // Sending only wakes the workers; it does not run them. Without a
+        // beat here the runtime is dropped first and the tasks die before
+        // reaching `eof`/`close`, so the box sees a dropped TCP connection and
+        // leaves a login session and an `omp acp` process lingering.
+        self.runtime.block_on(async {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        });
     }
 }
 
@@ -998,5 +1110,43 @@ mod tests {
             app.push_log(Scope::Shell, format!("line {index}"));
         }
         assert_eq!(app.log.len(), LOG_CAP);
+    }
+
+    #[test]
+    fn a_replaced_shell_cannot_close_its_successor() {
+        let mut app = app();
+        let old = app.shell_ui();
+        let new = app.shell_ui();
+
+        // The new session comes up.
+        let _ = new.send(Msg::ShellOpened {
+            host: "box-b".into(),
+        });
+        app.tick();
+        assert!(app.shell_live);
+
+        // The old worker now notices it was closed and says so. Before the
+        // epoch guard this tore down the session the user is actually using.
+        let _ = old.send(Msg::ShellClosed {
+            reason: "closed".into(),
+        });
+        let _ = old.send(Msg::ShellData(b"stale output".to_vec()));
+        app.tick();
+        assert!(app.shell_live, "the live session survived its predecessor");
+        assert_eq!(app.shell_host.as_deref(), Some("box-b"));
+    }
+
+    #[test]
+    fn a_replaced_agent_cannot_end_the_new_turn() {
+        let mut app = app();
+        let old = app.agent_ui();
+        let _new = app.agent_ui();
+        app.agent_busy = true;
+
+        let _ = old.send(Msg::AgentTurnEnd {
+            reason: "interrupted".into(),
+        });
+        app.tick();
+        assert!(app.agent_busy, "the previous agent did not unlock this one");
     }
 }

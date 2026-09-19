@@ -102,8 +102,29 @@ impl Msg {
     }
 }
 
-/// The UI thread's end of the bridge, cloned into every worker.
-pub type Ui = Sender<Msg>;
+/// A worker's end of the bridge.
+///
+/// It stamps every message with the epoch of the session that created it. A
+/// worker outlives the moment the UI stops caring about it — closing a shell
+/// only *asks* it to stop, and it still reports its own death afterwards — so
+/// without a stamp the dying session's `ShellClosed` arrives after its
+/// replacement is installed and tears the replacement down. The UI keeps the
+/// current epoch and drops anything older.
+#[derive(Debug, Clone)]
+pub struct Ui {
+    tx: Sender<(u64, Msg)>,
+    epoch: u64,
+}
+
+impl Ui {
+    pub fn new(tx: Sender<(u64, Msg)>, epoch: u64) -> Ui {
+        Ui { tx, epoch }
+    }
+
+    pub fn send(&self, msg: Msg) -> Result<(), std::sync::mpsc::SendError<(u64, Msg)>> {
+        self.tx.send((self.epoch, msg))
+    }
+}
 
 /// Report a failure and swallow the send error: if the UI is gone, the worker
 /// is about to be dropped anyway and there is nobody left to tell.

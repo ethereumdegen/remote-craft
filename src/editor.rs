@@ -95,8 +95,13 @@ impl Input {
     pub fn kill_word(&mut self) {
         let head = &self.text[..self.cursor];
         let trimmed = head.trim_end();
-        let start = match trimmed.rfind(char::is_whitespace) {
-            Some(index) => index + 1,
+        // Step over the separator by its own width, not by one byte.
+        // `char::is_whitespace` is the Unicode property, so it matches U+00A0
+        // (two bytes) — which macOS types for Option+Space and which web copy
+        // is full of — and `index + 1` would land mid-character and make
+        // `replace_range` panic, taking the whole client and both sessions down.
+        let start = match trimmed.char_indices().rfind(|(_, ch)| ch.is_whitespace()) {
+            Some((index, ch)) => index + ch.len_utf8(),
             None => 0,
         };
         self.text.replace_range(start..self.cursor, "");
@@ -162,6 +167,23 @@ mod tests {
         input.insert_str("cargo build --release");
         input.kill_word();
         assert_eq!(input.text(), "cargo build ");
+    }
+
+    #[test]
+    fn kill_word_survives_a_multibyte_separator() {
+        // Option+Space on macOS types U+00A0, and pasted web text is full of it.
+        // Treating it as one byte wide put the cut mid-character and panicked.
+        let mut input = Input::new();
+        input.insert_str("deploy\u{a0}now");
+        input.kill_word();
+        assert_eq!(input.text(), "deploy\u{a0}");
+
+        for separator in ['\u{2009}', '\u{3000}', '\t'] {
+            let mut input = Input::new();
+            input.insert_str(&format!("a{separator}bcd"));
+            input.kill_word();
+            assert_eq!(input.text(), format!("a{separator}"));
+        }
     }
 
     #[test]
