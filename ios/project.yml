@@ -89,6 +89,14 @@ targets:
           # rides SSH with a pinned host key regardless of this setting.
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
+        # Export compliance, declared once here so App Store Connect stops
+        # asking on every upload. The app is an SSH client, so it plainly uses
+        # encryption — but it implements none of its own: swift-nio-ssh and
+        # Citadel for SSH, URLSession for HTTPS, and the algorithms are the
+        # published standard ones (Ed25519, ECDSA P-256, AES-GCM). That is the
+        # exemption, and it is the same one other SSH clients on the store
+        # declare. Revisit this if the app ever ships its own cryptography.
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.remotecraft.ios
