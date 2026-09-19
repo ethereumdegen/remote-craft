@@ -126,6 +126,16 @@ final class GitHubDeviceFlowTests: XCTestCase {
                        .disabled)
     }
 
+    /// The exact reply `POST /login/device/code` gives for a client id GitHub has never
+    /// seen, captured from the live endpoint. It is the first error a new deployment
+    /// hits, and the generic path renders it as "GitHub said Not Found." — true, and no
+    /// help at all in finding the setting that is wrong.
+    func testUnknownClientIDNamesTheSetting() {
+        XCTAssertEqual(GitHubAuth.read(deviceCodeStatus: 404,
+                                       body: json(#"{"error":"Not Found"}"#)),
+                       .failed("GitHub does not recognize this client id. Check RCGitHubClientID in Info.plist."))
+    }
+
     func testPollDistinguishesWaitingFromRefusalAndDeath() {
         XCTAssertEqual(GitHubAuth.read(pollStatus: 200, body: json(#"{"error":"authorization_pending"}"#)), .pending)
         XCTAssertEqual(GitHubAuth.read(pollStatus: 200, body: json(#"{"error":"slow_down","interval":10}"#)), .slowDown)
