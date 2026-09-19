@@ -1,0 +1,97 @@
+# The Xcode project is generated from this file — run `xcodegen generate` before you
+# build, and again after adding any file. The .xcodeproj is gitignored on purpose: a
+# .pbxproj is a merge conflict waiting to happen and says nothing this file does not.
+name: RemoteCraft
+options:
+  bundleIdPrefix: com.remotecraft
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  # The terminal emulator. SwiftTerm ships a UIKit `TerminalView` and — despite what the
+  # package's own sources suggest — **no usable SwiftUI wrapper**: the one in the box is
+  # `internal` and `#if DEBUG`-gated, so it does not exist in a release build of the
+  # package. Sources/Features/Terminal/TerminalSurface.swift is ours for that reason.
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    from: 1.20.0
+  # The SSH client. Chosen for three things nothing else on iOS gives at once: async/await
+  # `withPTY`, OpenSSH private-key parsing, and a pluggable `SSHAuthenticationMethod` we
+  # can hand a Secure Enclave key through.
+  #
+  # Supply-chain note, accepted knowingly: Citadel does not depend on Apple's
+  # apple/swift-nio-ssh but on a third-party fork (`Wellz26/swift-nio-ssh`). That fork is
+  # what carries the patches Citadel needs, and pinning Apple's upstream instead does not
+  # build. Anyone auditing this app's dependencies should look at that fork, not only at
+  # Citadel.
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel.git
+    from: 0.12.1
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 5.0, not 6.0: the app is a thin shell over two callback-shaped C-and-NIO libraries
+    # (SwiftTerm's UIKit delegates, Citadel's channel handlers) that predate Sendable.
+    # @MainActor isolation already gives us what strict concurrency would police here,
+    # and @Observable works in either language mode.
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: "SWLCQ3VGVF"
+
+targets:
+  RemoteCraft:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: SwiftTerm
+      - package: Citadel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.remotecraft.ios
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Remote Craft
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        # The app is dark by design, not "in dark mode" — a light-appearance system must
+        # not repaint the canvas a terminal is drawn on.
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        # Debug builds only: a metalcraft-agent on the tailnet answers plain HTTP on
+        # :3002, and the simulator treats a tailnet address as a local one. Release
+        # builds keep App Transport Security intact — on a real device the tailnet is a
+        # utun interface and this key is not what carries it.
+        debug:
+          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+
+  # Pure logic, no box: the SSE frame parser, the host-candidate fallback order, the
+  # OpenSSH public-key wire encoding, the agent transcript reducer. Fast enough to run on
+  # every change, and none of it needs a machine to ssh into.
+  RemoteCraftTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/RemoteCraftTests
+    dependencies:
+      - target: RemoteCraft
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  RemoteCraft:
+    build:
+      targets:
+        RemoteCraft: all
+        RemoteCraftTests: [test]
+    test:
+      targets:
+        - RemoteCraftTests
+    run:
+      config: Debug
