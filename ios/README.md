@@ -51,16 +51,27 @@ round trip through App Store Connect to discover.
 
 A client id is **not** a secret: the device flow exchanges it for a token with no client
 secret at all, which is the entire reason this app can talk to GitHub without a backend.
-Register at <https://github.com/settings/apps> and set two things that are off by default
-and fail silently in different ways:
 
-- **Device flow: enabled.** Otherwise sign-in returns `device_flow_disabled`, which the
-  app names as a setup error rather than reporting "GitHub answered 400".
-- **"Git SSH keys" user permission: write.** A GitHub App ignores OAuth scopes entirely,
-  so the `write:public_key` in the request does nothing for one; the fine-grained user
-  permission is what grants `POST /user/keys`. Get it wrong and publishing returns 403.
-  (A classic **OAuth App** is the other option, and there `write:public_key` is exactly
-  what you need.)
+**Register a classic OAuth App**, at <https://github.com/settings/developers> → New OAuth
+App. It is the registration this code was written against: the request sends the
+`write:public_key` scope, which is exactly what `POST /user/keys` needs there, and its
+token does not expire. The form asks for two URLs it will never use for a device flow —
+there is no browser redirect in this app, the phone polls — so both are paperwork:
+
+| field | what to put | why |
+| --- | --- | --- |
+| Application name | `Remote Craft` | shown on the authorization screen |
+| Homepage URL | `https://github.com/<you>/remote-craft` | required; GitHub's own docs say to use the repository URL when there is no website |
+| Authorization callback URL | the same URL again | required by the form, ignored by the device flow |
+| Enable Device Flow | **checked** | unchecked, sign-in returns `device_flow_disabled` |
+
+A **GitHub App** works too and is the more modern registration, but it costs three extra
+traps. It ignores OAuth scopes entirely, so `write:public_key` does nothing and the
+fine-grained **"Git SSH keys" user permission must be set to write** or publishing
+returns 403. Its callback URL is genuinely optional. And *"Expire user authorization
+tokens" is on by default* — leave it on and the token dies after eight hours, which this
+app cannot survive: it stores one token in the Keychain and has no refresh flow, so
+sign-in has to be repeated. Uncheck it, or take the OAuth App.
 
 ## Source tree
 
