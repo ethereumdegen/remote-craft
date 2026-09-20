@@ -56,11 +56,16 @@ port 22 rate-limited, authorizes a key, and then writes
 non-interactive forms, both of which do the whole server side in one command:
 
 ```bash
-# authorize one specific key — what the iOS app's Secure Enclave key needs
+# authorize one specific key — what the iOS app's Secure Enclave key needs, and the
+# only non-interactive form every released Omarchy understands
 omarchy-setup-security-sshd --key="ecdsa-sha2-nistp256 AAAA… remote-craft@iPhone"
 
-# authorize every public key on a GitHub account — the "git keys" route
-omarchy-setup-security-sshd --gh-keys <github-username>
+# authorize every public key on a GitHub account — the "git keys" route.
+# --gh-keys was merged upstream on 2026-08-16, *after* the v4.0.4 tag, so a box on a
+# released Omarchy answers `unknown option` and exit 2 without touching anything;
+# the fallback drops into the same script's prompts, where "Grab key from GitHub"
+# plus the username does exactly what the flag would have.
+omarchy-setup-security-sshd --gh-keys <github-username> || omarchy-setup-security-sshd
 ```
 
 The second is literally `curl -fsSL https://github.com/<user>.keys` into

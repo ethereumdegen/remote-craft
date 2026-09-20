@@ -251,7 +251,7 @@ struct EnrollView: View {
                 .foregroundStyle(Theme.dim)
             CommandBlock(command: command, caption: "paste it into a terminal on the box")
             if published {
-                Text("Short because your key is on GitHub — no QR needed, and `--gh-keys` authorizes every key published on that account, not only this one.")
+                Text("Short because your key is on GitHub — no QR needed, and `--gh-keys` authorizes every key published on that account, not only this one. The second half runs only on an Omarchy too old for that flag, where the same script asks for the username instead.")
                     .font(Theme.mono(10))
                     .foregroundStyle(Theme.faint)
             } else {

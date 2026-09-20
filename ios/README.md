@@ -41,7 +41,7 @@ Both come from SwiftTerm, and both fail the build before a line of this app is c
 `RC_GITHUB_CLIENT_ID` in `project.yml` is empty in a clean checkout, and the app says so
 on screen rather than failing at the first request. Enrollment works without it — the box
 command just carries the whole key and the QR code stays. Fill it in, or pass
-`xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx`, to get the short `--gh-keys` command.
+`xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx`, to get the short username-shaped command.
 
 A client id is **not** a secret: the device flow exchanges it for a token with no client
 secret at all, which is the entire reason this app can talk to GitHub without a backend.
@@ -136,8 +136,15 @@ at `https://github.com/<you>.keys` — the URL Omarchy's script reads. The box c
 then becomes:
 
 ```sh
-omarchy-setup-security-sshd --gh-keys andrew
+omarchy-setup-security-sshd --gh-keys andrew || omarchy-setup-security-sshd
 ```
+
+The fallback is there because `--gh-keys` is **not in any released Omarchy**: it was
+merged upstream on 2026-08-16, after the v4.0.4 tag. A released box parses arguments
+before it does anything, so the flag costs one `unknown option` line and exit 2 with
+nothing installed, no port opened and no key authorized — and then the bare script runs
+and asks "Grab key from GitHub" plus the username, which is the same fetch of the same
+URL. One line, either Omarchy.
 
 No QR, no clipboard, no camera. Two things worth knowing before choosing it: `--gh-keys`
 authorizes **every** key published on that account, not only this phone's, which is a

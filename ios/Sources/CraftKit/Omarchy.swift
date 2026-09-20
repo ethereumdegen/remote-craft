@@ -17,8 +17,11 @@ import Foundation
 ///   then writes `PasswordAuthentication no` into
 ///   `/etc/ssh/sshd_config.d/10-omarchy-hardening.conf`. Password auth is dead after
 ///   enrollment, which is why this app never offers a password field.
-/// - Its two non-interactive flags are `--key=` and `--gh-keys`. The second is the "git
-///   keys" route: Omarchy fetches `https://github.com/<user>.keys` and appends each line.
+/// - Its one non-interactive flag in every *released* Omarchy is `--key=`. `--gh-keys`
+///   — the "git keys" route, which fetches `https://github.com/<user>.keys` and appends
+///   each line — landed upstream on 2026-08-16 and is still unreleased: v4.0.4 rejects
+///   it with `unknown option` and exit 2. `githubCommand` emits both forms for that
+///   reason.
 /// - Omarchy never generates a keypair. `install/user/git.sh` sets `user.name` and
 ///   `user.email` and stops there, so "use my GitHub keys" means a key that already
 ///   exists on some other machine — which is exactly why that branch has to end in an
@@ -131,12 +134,21 @@ enum Omarchy {
         return "\(setup) --key=\"\(line)\""
     }
 
-    /// `omarchy-setup-security-sshd --gh-keys <user>` — the box command.
+    /// `omarchy-setup-security-sshd --gh-keys <user> || omarchy-setup-security-sshd` —
+    /// the box command.
     ///
     /// The whole reason the app signs in to GitHub: this line is short enough to read
     /// off a phone and type at the box's keyboard, where `--key="ecdsa-sha2-nistp256
     /// AAAA…"` is a hundred characters of base64 that needs a QR code and a camera to
     /// cross the gap between the two machines.
+    ///
+    /// The `|| ` half is not decoration. `--gh-keys` exists only on Omarchy's master
+    /// branch (merged 2026-08-16, after the v4.0.4 tag), and a released box parses its
+    /// arguments *before* it touches anything: an unknown flag prints `unknown option`
+    /// and exits 2 having installed nothing, opened no port and authorized no key. The
+    /// fallback then runs the same script with no arguments, which asks the one
+    /// question the flag was answering — "Grab key from GitHub", then the username.
+    /// Same outcome, same two machines, one line that works on both.
     ///
     /// What it does not do is subscribe. Omarchy's script `curl`s
     /// `github.com/<user>.keys` exactly once, when it runs, so a key published
@@ -144,8 +156,10 @@ enum Omarchy {
     /// `RemoteEnroll` exists for every device after the first.
     static func githubCommand(username: String) -> String {
         let user = githubUsername(username)
-        guard !user.isEmpty else { return "\(setup) --gh-keys" }
-        return "\(setup) --gh-keys \(user)"
+        // No username is not a shorter command, it is a different one: `--gh-keys` with
+        // nothing after it is an error on master and an unknown flag everywhere else.
+        guard !user.isEmpty else { return setup }
+        return "\(setup) --gh-keys \(user) || \(setup)"
     }
 
     /// GitHub usernames are alphanumerics and hyphens, nothing else. Filtering rather

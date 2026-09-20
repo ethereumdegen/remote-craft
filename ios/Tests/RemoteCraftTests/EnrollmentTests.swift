@@ -33,11 +33,20 @@ final class EnrollmentCommandTests: XCTestCase {
     }
 
     /// A username field that can carry a `;` is a username field that can carry a second
-    /// command, and this one is pasted into a root-capable shell.
+    /// command, and this one is pasted into a root-capable shell. The trailing fallback
+    /// is what makes the line runnable on a released Omarchy, where `--gh-keys` does not
+    /// exist yet and the bare script asks for the username instead.
     func testGitHubUsernameIsFilteredNotQuoted() {
         XCTAssertEqual(Omarchy.githubCommand(username: "octocat; rm -rf /"),
-                       "omarchy-setup-security-sshd --gh-keys octocatrm-rf")
+                       "omarchy-setup-security-sshd --gh-keys octocatrm-rf || omarchy-setup-security-sshd")
         XCTAssertEqual(Omarchy.githubUsername("  Octo-Cat  "), "Octo-Cat")
+    }
+
+    /// Signed in with no login yet: the flag has nothing to carry, so the command is the
+    /// interactive script alone rather than a `--gh-keys` with an empty argument, which
+    /// is an error on every Omarchy that has the flag and an unknown option on the rest.
+    func testGitHubCommandWithoutAUsernameIsTheInteractiveScript() {
+        XCTAssertEqual(Omarchy.githubCommand(username: "  "), "omarchy-setup-security-sshd")
     }
 
     /// The second-device command runs over an SSH channel the app already has, so

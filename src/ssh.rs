@@ -254,12 +254,15 @@ impl SshClient {
         // Omarchy ships with sshd disabled and port 22 closed, so "nothing is
         // listening" is the single likeliest first-run answer — likelier than a
         // wrong address. Naming the command that fixes it turns a dead end into
-        // one line to paste on the box.
+        // one line to paste on the box. `--key=` rather than `--gh-keys`: the
+        // latter is unreleased (merged after v4.0.4) and a released box answers
+        // an unknown flag with exit 2, while this machine already has the public
+        // key the box needs sitting in a file.
         Err(anyhow!(
             "could not reach {} — tried {}. If this is an Omarchy box, SSH ships turned \
-             off: run `omarchy-setup-security-sshd --gh-keys <github-user>` on it (or \
-             Super+Space → Setup → Security → SSHD). Otherwise check the tailnet and the \
-             `port` in config.json",
+             off: run `omarchy-setup-security-sshd --key=\"$(cat ~/.ssh/id_ed25519.pub)\"` \
+             on it (or Super+Space → Setup → Security → SSHD). Otherwise check the tailnet \
+             and the `port` in config.json",
             target.label(),
             unreachable.join("; ")
         ))
