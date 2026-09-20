@@ -49,6 +49,17 @@ final class EnrollmentCommandTests: XCTestCase {
         XCTAssertEqual(Omarchy.githubCommand(username: "  "), "omarchy-setup-security-sshd")
     }
 
+    /// The username is typed by hand on the paste route, and it lands in a URL as well
+    /// as in a shell command. A name carrying a slash would point the "is my key there
+    /// yet?" check at someone else's page entirely.
+    func testGitHubKeysURLIsBuiltFromASanitizedUsername() {
+        XCTAssertEqual(Omarchy.githubKeysURL(username: "Octo-Cat")?.absoluteString,
+                       "https://github.com/Octo-Cat.keys")
+        XCTAssertEqual(Omarchy.githubKeysURL(username: "octocat/../attacker")?.absoluteString,
+                       "https://github.com/octocatattacker.keys")
+        XCTAssertNil(Omarchy.githubKeysURL(username: "   "))
+    }
+
     /// The second-device command runs over an SSH channel the app already has, so
     /// nobody will ever read it before it executes. Its two invariants — it cannot be
     /// escaped, and it cannot duplicate a line — have to be checked here instead.

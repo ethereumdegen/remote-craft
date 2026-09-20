@@ -147,6 +147,21 @@ this step actually fails:
 omarchy-setup-security-sshd --key="ecdsa-sha2-nistp256 AAAA… remote-craft@iphone"
 ```
 
+**Pasting the key into GitHub yourself shortens it, and costs no access to anything.**
+*or put the key on github yourself* copies this phone's public key and opens
+<https://github.com/settings/ssh/new>; paste it there, leave the type on
+**Authentication**, and it appears at `https://github.com/<you>.keys` — the URL Omarchy
+fetches. Type your username into the app and it builds the short box command; a *check
+github.com/<you>.keys* button opens the page Omarchy will read, which is the one place
+a mistake shows (a key pasted as a *signing* key is absent from it while looking present
+in your settings).
+
+This is the route to take. It does everything the device flow does — the key ends up at
+the same URL, the box command ends up the same length — with the copy staying on one
+device, clipboard to Safari, instead of crossing to another machine's keyboard. What it
+skips is the grant: `POST /user/keys` needs a token with **write access to every SSH key
+on the account**, held by an app, indefinitely, to add one key once.
+
 **Signing in to GitHub shortens that command to something typeable.** The app publishes
 this phone's *Enclave* public key to your account with `POST /user/keys`, which puts it
 at `https://github.com/<you>.keys` — the URL Omarchy's script reads. The box command

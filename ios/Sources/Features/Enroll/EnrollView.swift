@@ -27,6 +27,14 @@ struct EnrollView: View {
 
     @State private var enrollment = Enrollment()
 
+    /// The GitHub account the key was pasted into, typed once and kept.
+    ///
+    /// Separate from `GitHubAccount.login`, which only exists after a device-flow
+    /// sign-in: this route never obtains a token, so nothing but the user can say whose
+    /// account the key now sits on. Stored rather than asked for every time because the
+    /// box command is the thing the user comes back to this screen to re-read.
+    @AppStorage("github.pasted.login") private var pastedLogin = ""
+
     /// The Enclave key this phone would enroll. First one wins: a second Enclave key is
     /// a thing a user can make, but only one of them can be "this phone's key" on a
     /// screen whose whole job is to be unambiguous.
@@ -49,6 +57,7 @@ struct EnrollView: View {
                         if let key = enclaveKey {
                             if terminal.isLive { liveBox(key) }
                             signIn(key)
+                            pasteToGitHub(key)
                             boxCommand(key)
                             identity(key)
                         } else {
@@ -159,7 +168,7 @@ struct EnrollView: View {
         VStack(alignment: .leading, spacing: 10) {
             Eyebrow(text: "shorten the box command")
             if !GitHubApp.isConfigured {
-                Text("\(GitHubApp.unconfigured) Without it the box command below carries the whole key, which is what the QR code is for.")
+                Text("\(GitHubApp.unconfigured) Nothing is lost: paste the key into GitHub yourself below and the box command is just as short, or use the whole-key command further down, which is what the QR code is for.")
                     .font(Theme.mono(11))
                     .foregroundStyle(Theme.dim)
             } else if let login = github.login {
@@ -201,6 +210,51 @@ struct EnrollView: View {
                 Text(note)
                     .font(Theme.mono(11))
                     .foregroundStyle(github.isSignedIn ? Theme.live : Theme.alarm)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel()
+    }
+
+    /// Put the key on GitHub **by hand**, with no token and no app permissions.
+    ///
+    /// The device flow above and this panel end in the same place — this phone's public
+    /// key listed at `github.com/<you>.keys`, which is the URL Omarchy fetches — but
+    /// they cost completely different things. `POST /user/keys` needs write access to
+    /// every SSH key on the account, granted to this app, forever, so that it can add
+    /// one key once. Pasting does not: the app copies a public key to the clipboard and
+    /// opens Safari, and the account is never touched by anything but the user.
+    ///
+    /// It also keeps the copy *on one device*. The awkward step this whole screen is
+    /// fighting is a hundred characters of base64 crossing from a phone to a keyboard
+    /// somewhere else; clipboard-to-Safari stays on the phone, and what crosses to the
+    /// box afterwards is a GitHub username.
+    ///
+    /// The username is typed rather than discovered because without a token there is
+    /// nothing to ask. It is sanitized on the way into the command by
+    /// `Omarchy.githubUsername`, since that command is pasted into a root-capable shell.
+    @ViewBuilder
+    private func pasteToGitHub(_ key: KeyRecord) -> some View {
+        let login = Omarchy.githubUsername(pastedLogin)
+        VStack(alignment: .leading, spacing: 10) {
+            Eyebrow(text: "or put the key on github yourself")
+            Text("Same destination, no access granted to anything: copy this phone's public key, paste it at github.com/settings/ssh/new, and leave the type on *Authentication*. The app never holds a token and never touches your account — GitHub is only being used as the place Omarchy already knows how to fetch keys from.")
+                .font(Theme.mono(11))
+                .foregroundStyle(Theme.dim)
+            CommandBlock(command: key.publicLine, caption: "copy, then paste it into the Key field")
+            Button("open github.com/settings/ssh/new") { openURL(Omarchy.githubNewKeyURL) }
+                .buttonStyle(CraftButton())
+            CraftField(label: "your github username", text: $pastedLogin, placeholder: "octocat")
+            if !login.isEmpty {
+                Text("Once the key is listed, run this at the box's keyboard. It authorizes every key on that account, not only this phone's.")
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.dim)
+                CommandBlock(command: Omarchy.githubCommand(username: login),
+                             caption: "paste it into a terminal on the box")
+                if let listing = Omarchy.githubKeysURL(username: login) {
+                    Button("check github.com/\(login).keys") { openURL(listing) }
+                        .buttonStyle(CraftButton(tint: Theme.dim))
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

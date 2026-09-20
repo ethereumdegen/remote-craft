@@ -54,6 +54,27 @@ enum Omarchy {
     /// Put the stock host keys back when someone has deleted all but the RSA one.
     static let regenerateHostKeys = "sudo ssh-keygen -A && sudo systemctl restart sshd"
 
+    /// Where a person adds a public key to their own GitHub account by hand.
+    ///
+    /// The whole point of offering this next to the device flow: pasting a key here
+    /// costs the app no access to the account at all. `POST /user/keys` needs a token
+    /// with write access to every SSH key you own, which is a large grant for a
+    /// one-time copy the user can perform themselves in Safari, on the same phone, from
+    /// the clipboard. The form's type defaults to *Authentication*, which is the only
+    /// type that appears at `github.com/<user>.keys` and therefore the only type
+    /// Omarchy's fetch can see.
+    static let githubNewKeyURL = URL(string: "https://github.com/settings/ssh/new")!
+
+    /// The URL Omarchy itself reads, so the user can confirm the key is actually there
+    /// before walking to the box. A key pasted as a *signing* key is absent from this
+    /// page while looking present in the account's settings, and that is the one
+    /// failure this route can still produce.
+    static func githubKeysURL(username: String) -> URL? {
+        let user = githubUsername(username)
+        guard !user.isEmpty else { return nil }
+        return URL(string: "https://github.com/\(user).keys")
+    }
+
     /// List the fingerprints the box currently trusts, to compare with this phone's.
     static let listAuthorizedKeys = "ssh-keygen -lf ~/.ssh/authorized_keys"
 

@@ -73,10 +73,13 @@ The second is literally `curl -fsSL https://github.com/<user>.keys` into
 a *signing* key is silently absent, which is a confusing five minutes unless you know.
 Fix with `gh ssh-key add ~/.ssh/id_ed25519.pub --type authentication`.
 
-The iOS app signs in to GitHub and publishes its own Enclave key through
-`POST /user/keys`, so it always takes the short second form and never hits the
-signing-key trap — see `ios/README.md`. The TUI does neither: it runs on a machine that
-already has `ssh`, `gh` and a shell, where the first form is one paste.
+The iOS app gets its Enclave key to that URL two ways, and the default is the one that
+grants nothing: it copies the public key and opens `github.com/settings/ssh/new` for you
+to paste, so the account is touched only by its owner. Signing in and publishing through
+`POST /user/keys` is the same destination for a token with write access to every SSH key
+you own, and it is optional — see `ios/README.md`. Either way the app never hits the
+signing-key trap. The TUI does neither: it runs on a machine that already has `ssh`, `gh`
+and a shell, where the first form is one paste.
 
 Note what neither form is: a subscription. Omarchy `curl`s that URL once, when the script
 runs, so a key published afterwards is invisible to a box that already ran it. Every key
