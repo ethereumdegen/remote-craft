@@ -39,22 +39,6 @@ settings:
     # and @Observable works in either language mode.
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: "SWLCQ3VGVF"
-    # The GitHub OAuth client id, for the device-flow sign-in that publishes this
-    # phone's Secure Enclave public key to the user's account. Empty in a clean
-    # checkout, and the app says so on screen rather than failing at the first
-    # request — a client id is deployment configuration, like the bundle id, and
-    # cannot be committed on a stranger's behalf.
-    #
-    # A client id is NOT a secret: the device flow exchanges it for a token with no
-    # client secret at all, which is the entire reason this app can talk to GitHub
-    # without a backend holding one. Override per-build with
-    # `xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx` or fill it in here.
-    #
-    # Register at https://github.com/settings/apps — the app needs **Device flow
-    # enabled**, and the **"Git SSH keys" user permission set to write**. A GitHub
-    # App ignores OAuth scopes, so `write:public_key` in the request does nothing for
-    # one; the fine-grained user permission is what grants POST /user/keys.
-    RC_GITHUB_CLIENT_ID: ""
 
 targets:
   RemoteCraft:
@@ -76,10 +60,6 @@ targets:
         CFBundleDisplayName: Remote Craft
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        # Read by CraftKit/GitHubAuth.swift. Substituted from the build setting above
-        # rather than hardcoded, so a fork can point at its own registration without
-        # editing source.
-        RCGitHubClientID: $(RC_GITHUB_CLIENT_ID)
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         # The app is dark by design, not "in dark mode" — a light-appearance system

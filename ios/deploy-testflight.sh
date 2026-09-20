@@ -49,21 +49,6 @@ AUTH=(-authenticationKeyPath "$ASC_KEY_PATH"
       -authenticationKeyID "$ASC_KEY_ID"
       -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 
-# ---- GitHub device flow -----------------------------------------------------
-# project.yml ships RC_GITHUB_CLIENT_ID empty, so a build that does not override
-# it here reaches a tester's phone with GitHub sign-in dead: the app names the
-# missing Info.plist key on screen rather than failing at the first request, but
-# the whole "publish this phone's key to your account" route is gone with it.
-# Overriding on the xcodebuild command line rather than editing project.yml keeps
-# the id out of the repo. It is not a secret — the device flow exchanges it with
-# no client secret at all — it is simply per-account.
-GITHUB_SETTING=()
-if [ -n "${RC_GITHUB_CLIENT_ID:-}" ]; then
-  GITHUB_SETTING=("RC_GITHUB_CLIENT_ID=$RC_GITHUB_CLIENT_ID")
-else
-  printf '\033[33mwarning:\033[0m RC_GITHUB_CLIENT_ID is unset; this build ships without GitHub sign-in.\n' >&2
-fi
-
 # ---- bump the build number --------------------------------------------------
 # CFBundleVersion must strictly increase for every upload, so bump it in
 # project.yml (the source of truth XcodeGen reads) before regenerating.
@@ -93,7 +78,6 @@ xcodebuild archive \
   -skipPackagePluginValidation \
   -allowProvisioningUpdates \
   "${AUTH[@]}" \
-  ${GITHUB_SETTING[@]+"${GITHUB_SETTING[@]}"} \
   | grep -E '^(\*\*|.*(error|warning):)' || true
 [ -d "$ARCHIVE" ] || fail "archive failed — rerun without the grep filter to see why"
 

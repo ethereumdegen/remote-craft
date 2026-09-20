@@ -11,10 +11,6 @@ struct RemoteCraftApp: App {
     @State private var agent = AgentStore()
     @State private var navigator = Navigator()
     @State private var themes = ThemeStore()
-    /// App-scoped because the token outlives the enrollment sheet that obtained it and
-    /// the Keys tab reads the login too. `restore()` below reads only the login back;
-    /// the token itself is fetched from the Keychain at the moment it is used.
-    @State private var github = GitHubAccount()
     @State private var wake = Wake()
 
     @Environment(\.scenePhase) private var scenePhase
@@ -28,9 +24,7 @@ struct RemoteCraftApp: App {
                 .environment(agent)
                 .environment(navigator)
                 .environment(themes)
-                .environment(github)
                 .environment(wake)
-                .task { github.restore() }
                 #if DEBUG
                     .task { Launch.seed(hosts: hosts, keys: keys, navigator: navigator) }
                 #endif

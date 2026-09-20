@@ -3,23 +3,21 @@ import UIKit
 
 /// Connect this iPhone to an Omarchy box.
 ///
-/// One route now, not two. It used to branch on "this phone's key" versus "my GitHub
-/// keys", and the second branch ended by importing a private key off a laptop — the app
-/// then held real private bytes, which is strictly weaker than an Enclave key nothing
-/// can extract from the chip. Signing in to GitHub folds the branches together: the app
-/// publishes the *Enclave* key to the account, and `--gh-keys` authorizes that.
-///
-/// The screen is ordered by cost, cheapest first, because the right answer depends on
-/// something the app already knows:
+/// One key — the Secure Enclave P-256 key, whose private half cannot leave the chip —
+/// and three ways to make a box trust it. The screen is ordered by cost, cheapest
+/// first, because the right answer depends on something the app already knows:
 ///
 /// 1. **A box the terminal is on right now** — one tap, no new connection, no walk.
-/// 2. **The first box** — one command, typed at its keyboard. Nothing can remove this
-///    one: a stock Omarchy install has sshd off and port 22 closed by `ufw default deny
-///    incoming`, and no credential presented over a network opens a closed port. Signing
-///    in only shortens the command from a hundred characters of base64 to a username.
+/// 2. **Your GitHub account** — paste the public key at `github.com/settings/ssh/new`
+///    and the box command shrinks to a username, because Omarchy already knows how to
+///    fetch keys from there. The app holds no token and touches no account; the copy
+///    stays on this phone, clipboard to Safari.
+/// 3. **The first box, the long way** — one command carrying the whole key, typed at
+///    its keyboard. Nothing can remove this one: a stock Omarchy install has sshd off
+///    and port 22 closed by `ufw default deny incoming`, and no credential presented
+///    over a network opens a closed port.
 struct EnrollView: View {
     @Environment(KeyRing.self) private var keys
-    @Environment(GitHubAccount.self) private var github
     @Environment(TerminalStore.self) private var terminal
     @Environment(HostBook.self) private var hosts
     @Environment(\.openURL) private var openURL
@@ -29,10 +27,9 @@ struct EnrollView: View {
 
     /// The GitHub account the key was pasted into, typed once and kept.
     ///
-    /// Separate from `GitHubAccount.login`, which only exists after a device-flow
-    /// sign-in: this route never obtains a token, so nothing but the user can say whose
-    /// account the key now sits on. Stored rather than asked for every time because the
-    /// box command is the thing the user comes back to this screen to re-read.
+    /// Typed because this route never obtains a token: nothing but the user can say
+    /// whose account the key now sits on. Stored rather than asked for every time
+    /// because the box command is the thing a user comes back to this screen to re-read.
     @AppStorage("github.pasted.login") private var pastedLogin = ""
 
     /// The Enclave key this phone would enroll. First one wins: a second Enclave key is
@@ -40,12 +37,6 @@ struct EnrollView: View {
     /// screen whose whole job is to be unambiguous.
     private var enclaveKey: KeyRecord? {
         keys.keys.first { $0.isEnclave && !$0.publicLine.isEmpty }
-    }
-
-    /// Once the key is on the account, the box command is the short one. Before that it
-    /// has to carry the whole key.
-    private var published: Bool {
-        github.isSignedIn && (enrollment.publish?.isUsable ?? false)
     }
 
     var body: some View {
@@ -56,7 +47,6 @@ struct EnrollView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         if let key = enclaveKey {
                             if terminal.isLive { liveBox(key) }
-                            signIn(key)
                             pasteToGitHub(key)
                             boxCommand(key)
                             identity(key)
@@ -83,10 +73,6 @@ struct EnrollView: View {
             }
         }
         .tint(Theme.accent)
-        // A device-flow login polls for up to fifteen minutes, and GitHub allows the
-        // whole registration only 50 verifications an hour. A sheet the user swiped away
-        // must not keep spending that on their behalf.
-        .onDisappear { enrollment.cancelSignIn() }
     }
 
     // MARK: - the key
@@ -163,67 +149,15 @@ struct EnrollView: View {
 
     // MARK: - github
 
-    @ViewBuilder
-    private func signIn(_ key: KeyRecord) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Eyebrow(text: "shorten the box command")
-            if !GitHubApp.isConfigured {
-                Text("\(GitHubApp.unconfigured) Nothing is lost: paste the key into GitHub yourself below and the box command is just as short, or use the whole-key command further down, which is what the QR code is for.")
-                    .font(Theme.mono(11))
-                    .foregroundStyle(Theme.dim)
-            } else if let login = github.login {
-                Text("Signed in as \(login). Publishing this phone's key to that account puts it at github.com/\(login).keys, which is the URL Omarchy's `--gh-keys` reads — so the box command becomes a username instead of a hundred characters of base64.")
-                    .font(Theme.mono(11))
-                    .foregroundStyle(Theme.dim)
-                HStack(spacing: 10) {
-                    Button(enrollment.publishing ? "publishing" : "publish this phone's key") {
-                        Task { await enrollment.publishKey(key, as: github) }
-                    }
-                    .buttonStyle(CraftButton())
-                    .disabled(enrollment.publishing)
-                    Button("sign out") {
-                        github.signOut()
-                        enrollment.forgetResults()
-                    }
-                    .buttonStyle(CraftButton(tint: Theme.dim))
-                }
-                if let outcome = enrollment.publish {
-                    Text(outcome.summary)
-                        .font(Theme.mono(11))
-                        .foregroundStyle(outcome.isUsable ? Theme.live : Theme.alarm)
-                }
-            } else {
-                Text("Sign in and the app publishes this phone's Enclave key to your account, so the box command becomes `--gh-keys <you>` — short enough to type at the box's own keyboard. Nothing is imported: the private half still never leaves this chip.")
-                    .font(Theme.mono(11))
-                    .foregroundStyle(Theme.dim)
-                if let code = enrollment.code {
-                    deviceCode(code)
-                } else {
-                    Button(enrollment.signingIn ? "starting" : "sign in with github") {
-                        enrollment.signInToGitHub(as: github)
-                    }
-                    .buttonStyle(CraftButton())
-                    .disabled(enrollment.signingIn)
-                }
-            }
-            if let note = enrollment.signIn {
-                Text(note)
-                    .font(Theme.mono(11))
-                    .foregroundStyle(github.isSignedIn ? Theme.live : Theme.alarm)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panel()
-    }
-
-    /// Put the key on GitHub **by hand**, with no token and no app permissions.
+    /// Put the key on GitHub **by hand**: no token, no account access, no app
+    /// registration to keep alive.
     ///
-    /// The device flow above and this panel end in the same place — this phone's public
-    /// key listed at `github.com/<you>.keys`, which is the URL Omarchy fetches — but
-    /// they cost completely different things. `POST /user/keys` needs write access to
-    /// every SSH key on the account, granted to this app, forever, so that it can add
-    /// one key once. Pasting does not: the app copies a public key to the clipboard and
-    /// opens Safari, and the account is never touched by anything but the user.
+    /// This ends where a device-flow sign-in would have — this phone's public key
+    /// listed at `github.com/<you>.keys`, the URL Omarchy fetches — for none of the
+    /// cost. `POST /user/keys` needs write access to *every* SSH key on the account,
+    /// granted to an app, indefinitely, so that it can add one key once. Pasting does
+    /// not: the app copies a public key to the clipboard and opens Safari, and the
+    /// account is touched only by its owner.
     ///
     /// It also keeps the copy *on one device*. The awkward step this whole screen is
     /// fighting is a hundred characters of base64 crossing from a phone to a keyboard
@@ -261,62 +195,31 @@ struct EnrollView: View {
         .panel()
     }
 
-    /// The device code, which the user types on github.com.
-    ///
-    /// Shown big and selectable rather than only opened in a browser: the sign-in can
-    /// legitimately be completed on a different machine, and a code that only exists
-    /// inside a tap target cannot be.
-    private func deviceCode(_ code: DeviceCode) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(code.userCode)
-                .font(Theme.mono(22, weight: .semibold))
-                .foregroundStyle(Theme.ink)
-                .textSelection(.enabled)
-            Text("Enter it at \(code.verificationURL.absoluteString). This screen is waiting — it will notice by itself.")
-                .font(Theme.mono(10))
-                .foregroundStyle(Theme.faint)
-            HStack(spacing: 10) {
-                Button("open github") { openURL(code.verificationURL) }
-                    .buttonStyle(CraftButton())
-                Button("cancel") { enrollment.cancelSignIn() }
-                    .buttonStyle(CraftButton(tint: Theme.dim))
-            }
-        }
-    }
-
     // MARK: - the one command that cannot be avoided
 
-    /// The command for a box that has never heard of this phone.
+    /// The command for a box that has never heard of this phone, carrying the whole key.
     ///
     /// A stock Omarchy install has sshd off and `ufw default deny incoming` with only
-    /// LocalSend's 53317 open. No sign-in reaches that box, so somebody opens a terminal
-    /// on it with `Super + Return` once. What sign-in changes is the length: a published
-    /// key means `--gh-keys andrew`, which a person reads off a phone and types. Without
-    /// one it is the whole `authorized_keys` line, and the QR code exists because
-    /// retyping a hundred characters of base64 is how this step actually fails.
+    /// LocalSend's 53317 open. Nothing reaches that box over a network, so somebody
+    /// opens a terminal on it with `Super + Return` once. This is the form that needs
+    /// nothing else to exist — no GitHub account, no second machine — and the QR code
+    /// is here because retyping a hundred characters of base64 is how the step
+    /// actually fails. The panel above shortens it to a username, when you want that.
     private func boxCommand(_ key: KeyRecord) -> some View {
-        let command = published
-            ? Omarchy.githubCommand(username: github.login ?? "")
-            : Omarchy.enrollCommand(publicLine: key.publicLine)
-        return VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             Eyebrow(text: "one command on the box")
             Text("Open a terminal on the box with \(Omarchy.terminalKeybind) and run this. It switches sshd on, opens port 22 in the firewall, and authorizes this phone — all three, in one command. A stock Omarchy install has SSH off and port 22 closed, so this is the step that makes everything else possible.")
                 .font(Theme.mono(11))
                 .foregroundStyle(Theme.dim)
-            CommandBlock(command: command, caption: "paste it into a terminal on the box")
-            if published {
-                Text("Short because your key is on GitHub — no QR needed, and `--gh-keys` authorizes every key published on that account, not only this one. The second half runs only on an Omarchy too old for that flag, where the same script asks for the username instead.")
+            CommandBlock(command: Omarchy.enrollCommand(publicLine: key.publicLine),
+                         caption: "paste it into a terminal on the box")
+            VStack(alignment: .leading, spacing: 6) {
+                QRCode(text: Omarchy.enrollCommand(publicLine: key.publicLine))
+                Text("The same command as a QR, for pointing a camera at rather than retyping.")
                     .font(Theme.mono(10))
                     .foregroundStyle(Theme.faint)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    QRCode(text: command)
-                    Text("The same command as a QR, for pointing a camera at rather than retyping.")
-                        .font(Theme.mono(10))
-                        .foregroundStyle(Theme.faint)
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
             Text("No terminal handy? \(Omarchy.menuPath), then “Paste key manually”, and paste the key from the Keys tab.")
                 .font(Theme.mono(10))
                 .foregroundStyle(Theme.faint)

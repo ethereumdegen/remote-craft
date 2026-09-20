@@ -36,42 +36,18 @@ Both come from SwiftTerm, and both fail the build before a line of this app is c
 2. SwiftTerm has a Metal renderer, so the build needs the Metal toolchain, which Xcode 26
    no longer installs by default: `xcodebuild -downloadComponent MetalToolchain` (≈690 MB).
 
-### The GitHub sign-in, if you want it
+### No GitHub registration, no client id, no build-time configuration
 
-`RC_GITHUB_CLIENT_ID` in `project.yml` is empty in a clean checkout, and the app says so
-on screen rather than failing at the first request. Enrollment works without it — the box
-command just carries the whole key and the QR code stays. Fill it in, or pass
-`xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx`, to get the short username-shaped command.
+There is nothing to set up. The app never authenticates to GitHub, holds no token and
+makes no API call: the one place GitHub appears is a button that copies this phone's
+**public** key and opens `github.com/settings/ssh/new` for you to paste it.
 
-**A TestFlight build needs it too, and the release script will not invent one.** Put
-`RC_GITHUB_CLIENT_ID=…` in `deploy.env`; `deploy-testflight.sh` passes it to the archive
-and warns loudly when it is missing. A build uploaded without it reaches a tester's phone
-with the sign-in button explaining that the Info.plist key is empty, which is a whole
-round trip through App Store Connect to discover.
-
-A client id is **not** a secret: the device flow exchanges it for a token with no client
-secret at all, which is the entire reason this app can talk to GitHub without a backend.
-
-**Register a classic OAuth App**, at <https://github.com/settings/developers> → New OAuth
-App. It is the registration this code was written against: the request sends the
-`write:public_key` scope, which is exactly what `POST /user/keys` needs there, and its
-token does not expire. The form asks for two URLs it will never use for a device flow —
-there is no browser redirect in this app, the phone polls — so both are paperwork:
-
-| field | what to put | why |
-| --- | --- | --- |
-| Application name | `Remote Craft` | shown on the authorization screen |
-| Homepage URL | `https://github.com/<you>/remote-craft` | required; GitHub's own docs say to use the repository URL when there is no website |
-| Authorization callback URL | the same URL again | required by the form, ignored by the device flow |
-| Enable Device Flow | **checked** | unchecked, sign-in returns `device_flow_disabled` |
-
-A **GitHub App** works too and is the more modern registration, but it costs three extra
-traps. It ignores OAuth scopes entirely, so `write:public_key` does nothing and the
-fine-grained **"Git SSH keys" user permission must be set to write** or publishing
-returns 403. Its callback URL is genuinely optional. And *"Expire user authorization
-tokens" is on by default* — leave it on and the token dies after eight hours, which this
-app cannot survive: it stores one token in the Keychain and has no refresh flow, so
-sign-in has to be repeated. Uncheck it, or take the OAuth App.
+It used to sign in with the OAuth device flow and publish the key through
+`POST /user/keys`, which needed an OAuth App registration, a client id threaded through
+the build, and a token with write access to every SSH key on the account — all to spare
+the user one paste, on the same phone, into a page they were about to open anyway. That
+is gone: `GitHubAuth.swift`, `RC_GITHUB_CLIENT_ID`, `RCGitHubClientID` and the Keychain's
+`github.token` with it.
 
 ## Source tree
 
@@ -86,7 +62,6 @@ ios/
     CraftKit/                       the wire layer; no SwiftUI below this line
       Diagnosis.swift               failed-connection facts -> named, actionable diagnosis
       Host.swift                    SSHHost, candidate order, agent base URLs
-      GitHubAuth.swift              device-flow sign-in; publishes this phone's key
       Keys.swift                    KeyRecord, Secure Enclave + imported keys, SSH auth
       Omarchy.swift                 the box's own commands, and the ones run over SSH
       PublicKeyLine.swift           OpenSSH public-key wire format + SHA256 fingerprints
@@ -156,16 +131,12 @@ github.com/<you>.keys* button opens the page Omarchy will read, which is the one
 a mistake shows (a key pasted as a *signing* key is absent from it while looking present
 in your settings).
 
-This is the route to take. It does everything the device flow does — the key ends up at
-the same URL, the box command ends up the same length — with the copy staying on one
-device, clipboard to Safari, instead of crossing to another machine's keyboard. What it
-skips is the grant: `POST /user/keys` needs a token with **write access to every SSH key
-on the account**, held by an app, indefinitely, to add one key once.
+This is the route to take, and it costs the app nothing: no token, no registration, no
+standing access to an account. `POST /user/keys` would have needed write access to
+**every** SSH key you own, granted indefinitely, to add one key once — the copy it
+saved you is the one that stays on this phone anyway, clipboard to Safari.
 
-**Signing in to GitHub shortens that command to something typeable.** The app publishes
-this phone's *Enclave* public key to your account with `POST /user/keys`, which puts it
-at `https://github.com/<you>.keys` — the URL Omarchy's script reads. The box command
-then becomes:
+The box command it produces:
 
 ```sh
 omarchy-setup-security-sshd --gh-keys andrew || omarchy-setup-security-sshd
@@ -178,17 +149,11 @@ nothing installed, no port opened and no key authorized — and then the bare sc
 and asks "Grab key from GitHub" plus the username, which is the same fetch of the same
 URL. One line, either Omarchy.
 
-No QR, no clipboard, no camera. Two things worth knowing before choosing it: `--gh-keys`
-authorizes **every** key published on that account, not only this phone's, which is a
-wider grant than `--key=`; and because the app creates the key through the API it is
-always an *authentication* key, which removes the old trap where a *signing* key is
-absent from `/<user>.keys` and `--gh-keys` silently authorizes nothing.
-
-Sign-in is the OAuth **device flow** — the app shows an eight-character code, you enter
-it at `github.com/login/device`. Not the web flow: GitHub still requires `client_secret`
-at the token endpoint even with PKCE, and a client secret needs a server this app has
-deliberately never had. The device flow exchanges a `client_id` alone, which is not a
-secret and ships in the bundle.
+Two things worth knowing before choosing this over `--key=`: it authorizes **every** key
+published on that account, not only this phone's, which is a wider grant; and the key
+must be pasted as an *authentication* key, since a *signing* key never appears at
+`/<user>.keys` and would leave the box authorizing nothing. The app's *check
+github.com/<you>.keys* button exists to show you which of the two you got.
 
 **Every box after the first costs nothing.** `--gh-keys` is a snapshot: Omarchy `curl`s
 the URL once, when the script runs, so a key published afterwards is invisible to a box

@@ -27,16 +27,6 @@ enum Secret {
     static func hostKey(address: String, port: Int) -> String { "hostkey.\(address):\(port)" }
     /// The workshop API bearer for agent id `id`.
     static func agentToken(_ id: String) -> String { "agent.token.\(id)" }
-    /// The GitHub user access token from the device flow.
-    ///
-    /// The only credential here that reaches something other than the user's own box,
-    /// and the only one whose blast radius is an account rather than a machine. It is
-    /// held for one purpose — publishing this phone's Enclave public key — and
-    /// `GitHubAccount.signOut()` deletes it; nothing in the app refreshes it silently.
-    static let githubToken = "github.token"
-    /// The GitHub login the token belongs to, so the box command can be built without a
-    /// round trip and without the user retyping a name the app already knows.
-    static let githubLogin = "github.login"
 }
 
 enum Keychain {
