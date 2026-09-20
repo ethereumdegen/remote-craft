@@ -43,6 +43,12 @@ on screen rather than failing at the first request. Enrollment works without it 
 command just carries the whole key and the QR code stays. Fill it in, or pass
 `xcodebuild RC_GITHUB_CLIENT_ID=Iv1.xxxxxxxx`, to get the short username-shaped command.
 
+**A TestFlight build needs it too, and the release script will not invent one.** Put
+`RC_GITHUB_CLIENT_ID=…` in `deploy.env`; `deploy-testflight.sh` passes it to the archive
+and warns loudly when it is missing. A build uploaded without it reaches a tester's phone
+with the sign-in button explaining that the Info.plist key is empty, which is a whole
+round trip through App Store Connect to discover.
+
 A client id is **not** a secret: the device flow exchanges it for a token with no client
 secret at all, which is the entire reason this app can talk to GitHub without a backend.
 Register at <https://github.com/settings/apps> and set two things that are off by default
