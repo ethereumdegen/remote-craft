@@ -31,7 +31,7 @@ packages:
 
 settings:
   base:
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "4"
     # 5.0, not 6.0: the app is a thin shell over two callback-shaped C-and-NIO libraries
     # (SwiftTerm's UIKit delegates, Citadel's channel handlers) that predate Sendable.
