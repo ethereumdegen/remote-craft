@@ -59,7 +59,6 @@ struct TerminalScreen: View {
                     // A different box gets a different terminal, rather than two
                     // machines' scrollback interleaved in one buffer.
                     .id(terminal.incarnation)
-                    .ignoresSafeArea(.container, edges: .bottom)
             }
         } else if hosts.hosts.isEmpty {
             EmptyState(icon: "server.rack",
@@ -98,7 +97,10 @@ struct TerminalScreen: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Theme.surface)
+        // The fill, not the controls, reaches past the home indicator: the bar is a
+        // bottom `safeAreaInset`, so its own layout stops at the safe area and the
+        // strip below it would otherwise show the backdrop through a seam.
+        .background(Theme.surface.ignoresSafeArea(edges: .bottom))
         .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
     }
 
